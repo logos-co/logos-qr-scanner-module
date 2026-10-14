@@ -17,6 +17,8 @@ pub const DENIED_HINT: &str =
     "the camera can't be opened: the user needs access to /dev/video* (the video group)";
 
 #[derive(Debug, PartialEq, Eq)]
+// Only macOS asks ahead; elsewhere the camera is refused when it opens.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub enum Access {
     Granted,
     Denied,

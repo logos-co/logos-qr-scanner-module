@@ -27,7 +27,7 @@
           nativeBuildInputs = [ pkgs.cmake pkgs.pkg-config ];
           # SDL finds its video and camera backends here; it loads them at run time.
           buildInputs = lib.optionals pkgs.stdenv.isLinux (with pkgs; [
-            xorg.libX11 xorg.libXext xorg.libXcursor xorg.libXi xorg.libXrandr xorg.libXScrnSaver xorg.libXtst xorg.libXfixes
+            xorg.libX11 xorg.libXext xorg.libXcursor xorg.libXi xorg.libXrandr xorg.libXScrnSaver xorg.libXtst xorg.libXfixes xorg.libxcb
             wayland wayland-scanner libxkbcommon libdecor pipewire libGL
           ]);
           # With the fake device beside it, for doctests; only logos-qr-helper is ever shipped.
