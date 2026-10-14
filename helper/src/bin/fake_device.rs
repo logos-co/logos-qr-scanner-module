@@ -68,7 +68,8 @@ fn main() {
                     std::thread::spawn(move || loop {
                         for text in &say {
                             let (cw, ch, px) = raster(text);
-                            if writeln!(w, "raster {cw} {ch}").is_err() || w.write_all(&px).is_err() {
+                            if writeln!(w, "raster {cw} {ch}").is_err() || w.write_all(&px).is_err()
+                            {
                                 return;
                             }
                             std::thread::sleep(Duration::from_millis(200));

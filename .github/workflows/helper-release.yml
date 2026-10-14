@@ -112,7 +112,7 @@ jobs:
       # SDL loads X11, Wayland and PipeWire at run time; it needs their headers to build those backends.
       - run: |
           sudo apt-get update
-          sudo apt-get install -y cmake pkg-config libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev \
+          sudo apt-get install -y cmake pkg-config libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxtst-dev libxfixes-dev \
             libxss-dev libwayland-dev wayland-protocols libxkbcommon-dev libdecor-0-dev libpipewire-0.3-dev libgl1-mesa-dev
       - name: Build
         run: |

@@ -72,6 +72,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: helper
+      # SDL builds its X11 and Wayland backends from these headers; it loads the libraries at run time.
+      - name: SDL's build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake pkg-config libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev \
+            libxtst-dev libxfixes-dev libxss-dev libwayland-dev wayland-protocols libxkbcommon-dev libdecor-0-dev \
+            libpipewire-0.3-dev libgl1-mesa-dev
       - name: cargo test (fake mode included)
         run: |
           set -o pipefail
