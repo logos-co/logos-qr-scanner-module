@@ -1,0 +1,29 @@
+[package]
+name = "qr_scanner_module"
+version = "0.1.0"
+edition = "2021"
+description = "Logos QR scanner module: shows QR codes and reads them through the camera, via the Logos QR helper it bundles."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/logos-co/logos-qr-scanner-module"
+# The module builder's rustc; resolver 3 keeps the lock within it.
+rust-version = "1.89"
+
+[workspace]
+resolver = "3"
+
+[lib]
+# staticlib for the Qt plugin; rlib so cargo test builds the core without the Logos runtime.
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+qrcodegen = "1.8"
+getrandom = "0.3"
+
+# Staged by the builder as a sibling crate; optional so cargo test builds the core without it.
+logos-rust-sdk = { path = "../logos-rust-sdk-src", optional = true }
+
+[features]
+default = ["logos_module"]
+logos_module = ["dep:logos-rust-sdk"]

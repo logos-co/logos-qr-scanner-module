@@ -1,0 +1,147 @@
+name: "Showing and reading QR codes"
+output: qr-scanner-runtime.md
+release: ""
+
+intro: |
+  `qr_scanner_module` shows QR codes and reads QR codes through the camera for other modules. It never
+  opens the camera itself: the Logos QR helper it bundles does, and hands back only the text of each
+  code. One session runs at a time, and what a session read goes only to the holder of its token.
+
+  This doc-test runs headless through `logoscore`. The helper runs in fake mode: instead of a camera and
+  a window, it talks to `qr-fake-device`, which logs what the window would show and holds up a code for
+  the camera.
+
+what_you_build: "The QR scanner module and a fake QR device, driven through a `logoscore` daemon."
+
+what_you_learn:
+  - How a module shows codes and reads the answer through the scanner
+  - Why a session's texts go only to the holder of its token
+  - How a terminal shows the codes when there is no window
+
+prerequisites:
+  - "**Nix** with flakes enabled."
+  - "**A Linux or macOS machine.** Everything here is offline, and no camera is needed."
+
+sections:
+  - title: "Build logoscore and lgpm"
+    step: true
+    steps:
+      - title: "Build logoscore"
+        run: "nix build 'github:logos-co/logos-logoscore-cli#cli' --out-link ./logos"
+        check_file: "logos/bin/logoscore"
+      - title: "Build lgpm"
+        run: "nix build 'github:logos-co/logos-package-manager#cli' -o lgpm"
+        check_file: "lgpm/bin/lgpm"
+
+  - title: "Build and install the scanner"
+    step: true
+    steps:
+      - title: "Build the module, the fake device and the terminal presenter"
+        run: |
+          nix build 'github:logos-co/logos-qr-scanner-module{release}#lgx' --no-write-lock-file -o scanner-lgx
+          nix build 'github:logos-co/logos-qr-scanner-module{release}#fake-device' --no-write-lock-file -o device
+          nix build 'github:logos-co/logos-qr-scanner-module{release}#qr-present' --no-write-lock-file -o present
+          ls scanner-lgx/*.lgx device/bin/ present/bin/
+        code_block: |
+          nix build '.#lgx' -o scanner-lgx
+          nix build '.#fake-device' -o device      # a QR device in software, for tests
+        expect_contains:
+          - "qr-fake-device"
+          - "qr-present"
+      - title: "Install it"
+        run: |
+          mkdir -p modules
+          cp -RL ./logos/modules/. ./modules/
+          chmod -R u+w modules
+          ./lgpm/bin/lgpm --modules-dir ./modules --allow-unsigned install --file scanner-lgx/*.lgx
+          ./lgpm/bin/lgpm --modules-dir ./modules list
+        code_block: "lgpm --modules-dir ./modules --allow-unsigned install --file scanner-lgx/*.lgx"
+        expect_contains:
+          - "qr_scanner_module"
+
+  - title: "A fake device, and the daemon"
+    step: true
+    steps:
+      - title: "Start the fake device, holding up a code"
+        run: "sh -c './device/bin/qr-fake-device --say UR:BYTES/HDCXDWINVEZM --log device.log > device.addr 2> device.err & echo $! > device.pid'; sleep 1; cat device.addr"
+        code_block: "qr-fake-device --say UR:BYTES/HDCXDWINVEZM --log device.log > device.addr &"
+        expect_contains:
+          - "127.0.0.1:"
+      - title: "Start the daemon, its helper pointed at the fake device"
+        text: "Without `LOGOS_QR_HELPER_FAKE`, the helper opens the camera and a window."
+        run: "sh -c 'LOGOS_QR_HELPER_FAKE=$(cat device.addr) ./logos/bin/logoscore -D -m ./modules > logs.txt 2>&1 &'"
+        code_block: "LOGOS_QR_HELPER_FAKE=127.0.0.1:<port> logoscore -D -m ./modules > logs.txt &"
+      - run: "sleep 3"
+      - title: "Load the scanner"
+        run: "./logos/bin/logoscore load-module qr_scanner_module"
+        code_block: "logoscore load-module qr_scanner_module"
+        expect_contains:
+          - "qr_scanner_module"
+
+  - title: "Show a code and read the answer"
+    step: true
+    text: |
+      A caller starts a session with the parts to show and `scan`. The helper shows the parts, here to the
+      fake device's log, and reports each new code the camera reads. The caller polls with its token.
+    steps:
+      - title: "Start a session"
+        run: |
+          ./logos/bin/logoscore call qr_scanner_module start '{"title":"doc-test","show":{"parts":["UR:BYTES/AEADAOLYTOMWGTKP"]},"scan":true,"hint":"show the answer"}' > start.json
+          python3 -c 'import json,sys; r=json.loads(json.load(open(sys.argv[1]))["result"]); print(r["session"]); print(r["token"], file=open("token","w"))' start.json > session
+          cat session
+        code_block: "logoscore call qr_scanner_module start '{\"show\":{\"parts\":[\"UR:BYTES/...\"]},\"scan\":true}'"
+        expect_contains:
+          - "qrs_"
+      - title: "Poll it until the code is read"
+        run: |
+          for i in $(seq 1 40); do ./logos/bin/logoscore call qr_scanner_module poll "$(cat session)" "$(cat token)" > poll.json; grep -q 'HDCXDWINVEZM' poll.json && break; sleep 0.5; done
+          cat poll.json
+        code_block: "logoscore call qr_scanner_module poll <session> <token>"
+        expect_contains:
+          - '\"state\":\"running\"'
+          - "UR:BYTES/HDCXDWINVEZM"
+      - title: "The device was shown the code"
+        run: "grep -q '\"bits\"' device.log && echo 'shown to the device'"
+        expect_contains:
+          - "shown to the device"
+      - title: "Someone else's token gets nothing"
+        run: "./logos/bin/logoscore call qr_scanner_module poll \"$(cat session)\" 0123456789abcdef0123456789abcdef"
+        expect_contains:
+          - "not authorized"
+      - title: "A second caller waits its turn"
+        run: "./logos/bin/logoscore call qr_scanner_module start '{\"scan\":true}'"
+        expect_contains:
+          - "busy"
+      - title: "Stop it"
+        run: "./logos/bin/logoscore call qr_scanner_module stop \"$(cat session)\" \"$(cat token)\""
+        expect_contains:
+          - '\"ok\":true'
+
+  - title: "Codes in a terminal"
+    step: true
+    text: |
+      With no window, a terminal can show the codes. `qr-present` attaches as the scanner's presenter and
+      prints what the module renders, through plain `logoscore call`; new sessions then read the camera
+      without a window.
+    steps:
+      - title: "Run the presenter, and start a session that shows a code"
+        run: |
+          sh -c 'COLUMNS=100 LINES=50 ./present/bin/qr-present ./logos/bin/logoscore > present.out 2>&1 & echo $! > present.pid'
+          sleep 2
+          ./logos/bin/logoscore call qr_scanner_module start '{"title":"terminal","show":{"parts":["UR:BYTES/AEADAOLYTOMWGTKP"]}}' > start2.json
+          sleep 2
+          kill "$(cat present.pid)"
+          sleep 1
+          grep -q 'terminal' present.out && echo 'presented'
+        code_block: "tools/qr-present          # Ctrl-C to stop"
+        expect_contains:
+          - "presented"
+      - title: "It drew the code in half blocks"
+        run: "grep -q '▀' present.out && echo 'half blocks'"
+        expect_contains:
+          - "half blocks"
+
+  - title: "Stop"
+    step: true
+    steps:
+      - run: "./logos/bin/logoscore stop || true; kill \"$(cat device.pid)\" || true"

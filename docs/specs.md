@@ -1,0 +1,120 @@
+# qr_scanner_module
+
+`qr_scanner_module` shows QR codes and reads QR codes through the camera for other modules and apps. It
+does neither itself. It bundles the **Logos QR helper**, a small program that alone opens the camera, and
+hands back only the text of each code it reads: the camera's pictures never leave the helper.
+
+## Why a helper, and why one
+
+- **The camera stays out of host apps.** Basecamp, `logos_host`, `ui-host` and `logoscore` carry no camera
+  entitlement or usage string, and none is needed.
+- **One identity.** On macOS the helper is an app, `LogosQR.app` (`co.logos.QRHelper`, "Logos QR"). It
+  re-executes itself with its responsibility disclaimed (`responsibility_spawnattrs_setdisclaim`, looked up at
+  run time), so macOS asks for the camera in the helper's name, whoever started it, and the grant is the
+  helper's alone.
+- **Built and signed once.** The helper is released on its own tags (`helper-vX.Y.Z`). This module pins one
+  release by URL and sha256 in `helper.json` and copies it beside its plugin after the build's fixup, so
+  strip and re-signing never touch it. A module update keeps the camera grant; only a helper update can ask
+  again (an ad-hoc signed helper always does; a Developer ID signed one keeps it).
+- **One camera at a time.** One session runs at a time; a second caller is told `busy`.
+
+## Sessions
+
+A caller starts a session, polls it for the text of the codes the camera read, reports its progress, and
+stops it. Only the holder of a session's token can poll, report or stop it. The answer to an unknown session
+and to someone else's is the same: `not authorized`.
+
+A session nobody polls for 30 seconds has lost its caller: the next `start` ends it.
+
+| Method | Parameters | Answer |
+|---|---|---|
+| `scanner_info` | | `{ ok, version, helper }`: this module's version, and the path of the helper it runs once one has started |
+| `start` | `{ title?, show?: { parts, interval_ms?, max_version? }, scan, hint? }` | `{ ok, session, token }`. `parts` are shown as QR codes in turn, `interval_ms` each (200 by default), each at most version `max_version` (25 by default), error correction L. `scan` opens the camera. The caller's module name is added to the title |
+| `poll` | `session, token` | `{ ok, state, texts, error?, camera?, presenter, presenter_max_version? }`. `texts` holds each new code's text once. `state` is `starting`, `running`, `cancelled` (the person pressed Cancel), `failed` (with `error`) or `stopped` |
+| `progress` | `session, token, { received, expected }` | `{ ok }`. Shown under the camera's picture |
+| `stop` | `session, token` | `{ ok }`. Closes the helper |
+
+Errors are `{ ok: false, code, error }`, with `code` one of `busy`, `invalid`, `not_authorized`, `helper`. A
+session's own `error.code` comes from the helper: `camera_denied`, `no_camera`, `camera_failed`,
+`no_window`, `helper`.
+
+### Events
+
+| Event | Arguments |
+|---|---|
+| `scanner_changed` | `session, state`: the session changed or read something. It never says what: callers poll with their token |
+
+## The terminal presenter
+
+Without a window, as on a Linux text console or under a daemon, a terminal can show the codes instead. The
+module draws them; `tools/qr-present` and `tools/qr-present.ps1` only print what it returns, through plain
+`logosctl call`.
+
+| Method | Parameters | Answer |
+|---|---|---|
+| `presenter_attach` | | A handle, as plain text |
+| `presenter_render` | `handle, cols, rows` | The frame due now, as plain text: half blocks, two modules a character, black on white through ANSI codes, with a status line. Each call renews the presenter's claim |
+| `presenter_detach` | `handle` | `detached` |
+
+While a presenter rendered in the last 10 seconds, new sessions start the helper with `--no-window`: the
+camera still reads, and the codes go to the terminal. `poll` then answers `presenter: true` and the largest
+code version the terminal holds, so a caller can make its parts smaller.
+
+## The helper
+
+`logos-qr-helper` speaks JSON lines: commands on its standard input, events on its standard output. It ends
+when its standard input does, so it never outlives its module.
+
+| Command | Fields |
+|---|---|
+| `show` | `title?, frames: [{ size, bits }], interval_ms` |
+| `scan` | `title?, hint?` |
+| `progress` | `received, expected` |
+| `title` | `title` |
+| `close` | |
+
+| Event | Fields |
+|---|---|
+| `ready` | `version, window, fake` |
+| `camera` | `name` |
+| `text` | `text`, once per distinct text |
+| `cancelled` | |
+| `error` | `code, message` |
+
+- **Camera.** SDL3's camera API, at the widest format up to 1920 pixels, in NV12 for its grayscale plane.
+  On macOS the helper asks for access itself first, since SDL relies on an implicit prompt. `LOGOS_QR_CAMERA`
+  picks a camera by name; Tab switches cameras in the window.
+- **Decoding.** zxing-cpp over the whole frame, then rqrr over its centre when zxing found nothing.
+- **Window.** SDL3's renderer: the frames, the camera's picture framed green while a code is in view, the
+  status, and Cancel (or Escape).
+- **Fake mode.** `LOGOS_QR_HELPER_FAKE=host:port` replaces the camera and the window with a TCP peer: it is
+  sent `{"show": {frames, interval_ms}}` and `{"scan": true}` lines, and sends `raster <w> <h>\n` followed by
+  `w*h` grayscale bytes for the decoders to read.
+- **`LOGOS_QR_HELPER`** makes this module run another helper, for development.
+
+## Packaging
+
+| System | Beside the plugin |
+|---|---|
+| macOS | `LogosQR.app`: Info.plist with `NSCameraUsageDescription`, the hardened runtime, `com.apple.security.device.camera` |
+| Linux | `logos-qr-helper` |
+| Windows | `logos-qr-helper.exe` |
+
+Where `helper.json` pins no release for a system, the module carries a development build from source:
+`co.logos.QRHelper.dev`, ad-hoc signed, for tests. A local build wrapped by `helper/scripts/make-app.sh`
+gets the same `.dev` id, so it never touches the release's grant.
+
+## By hand
+
+On a Mac with a camera, build the helper and run it with `--probe`: macOS asks in the helper's name, and the
+window prints each code it reads on standard output.
+
+```sh
+cargo build --release --manifest-path helper/Cargo.toml
+sh helper/scripts/make-app.sh helper/target/release/logos-qr-helper helper/target/app 0.1.0
+helper/target/app/LogosQR.app/Contents/MacOS/logos-qr-helper --probe
+```
+
+Measured on 2026-10-14 on macOS 27.0.1 with a MacBook's FaceTime HD camera: the prompt named "Logos QR
+(dev)", tccd attributed the access to the helper's bundle id, and the camera read a Keycard Shell's animated
+account code, 70 parts in about a minute.

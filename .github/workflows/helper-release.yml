@@ -1,0 +1,191 @@
+name: Helper Release
+
+# Builds the Logos QR helper once per helper-v* tag, with each system's own toolchain so nothing points
+# into /nix/store, signs the macOS app, and attaches every build to a DRAFT release with a manifest of
+# sha256s. The module pins one release in helper.json and copies it unchanged. Run by hand, it only
+# uploads the builds as workflow artifacts.
+
+on:
+  push:
+    tags: ["helper-v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  RUST_VERSION: "1.89"
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        run: |
+          v=$(grep -m1 '^version' helper/Cargo.toml | cut -d'"' -f2)
+          if [ "${GITHUB_REF_TYPE}" = tag ] && [ "${GITHUB_REF_NAME}" != "helper-v$v" ]; then
+            echo "tag ${GITHUB_REF_NAME} doesn't match helper/Cargo.toml's $v"; exit 1
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+  macos:
+    needs: version
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - name: Build both architectures
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+        run: |
+          cd helper
+          cargo build --locked --release --target aarch64-apple-darwin
+          cargo build --locked --release --target x86_64-apple-darwin
+          lipo -create -output ../logos-qr-helper \
+            target/aarch64-apple-darwin/release/logos-qr-helper target/x86_64-apple-darwin/release/logos-qr-helper
+          otool -L ../logos-qr-helper | tee /dev/stderr | grep -q /nix/store && exit 1 || true
+      - name: Import the Developer ID certificate
+        id: cert
+        env:
+          P12: ${{ secrets.MACOS_CODESIGN_P12 }}
+          P12_PASSWORD: ${{ secrets.MACOS_CODESIGN_P12_PASSWORD }}
+          IDENTITY: ${{ secrets.MACOS_CODESIGN_IDENT }}
+        run: |
+          if [ -z "$P12" ]; then echo "identity=-" >> "$GITHUB_OUTPUT"; echo "no certificate: signing ad hoc"; exit 0; fi
+          kc="$RUNNER_TEMP/signing.keychain-db"
+          security create-keychain -p ci "$kc"
+          security set-keychain-settings -lut 3600 "$kc"
+          security unlock-keychain -p ci "$kc"
+          echo "$P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$kc" -P "$P12_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k ci "$kc"
+          security list-keychains -d user -s "$kc" $(security list-keychains -d user | tr -d '"')
+          echo "identity=$IDENTITY" >> "$GITHUB_OUTPUT"
+      - name: Wrap and sign LogosQR.app
+        env:
+          CODESIGN_IDENTITY: ${{ steps.cert.outputs.identity }}
+        run: sh helper/scripts/make-app.sh logos-qr-helper out "${{ needs.version.outputs.version }}" --release
+      - name: Notarize and staple
+        if: steps.cert.outputs.identity != '-'
+        env:
+          KEY: ${{ secrets.MACOS_NOTARY_API_KEY }}
+          KEY_ID: ${{ secrets.MACOS_NOTARY_API_KEY_ID }}
+          ISSUER: ${{ secrets.MACOS_NOTARY_API_ISSUER }}
+        run: |
+          echo "$KEY" > "$RUNNER_TEMP/key.p8"
+          ditto -c -k --keepParent out/LogosQR.app "$RUNNER_TEMP/LogosQR.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/LogosQR.zip" --key "$RUNNER_TEMP/key.p8" --key-id "$KEY_ID" --issuer "$ISSUER" --wait
+          xcrun stapler staple out/LogosQR.app
+      - name: Package
+        run: |
+          v=${{ needs.version.outputs.version }}
+          tar --no-xattrs -czf "LogosQR-$v-macos-universal.tar.gz" -C out LogosQR.app
+          codesign -dvvv out/LogosQR.app 2>&1 | sed -n 's/^CDHash=//p' > cdhash.txt
+          codesign -d -r- out/LogosQR.app 2>&1 | sed -n 's/^designated => //p' > requirement.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: |
+            LogosQR-*.tar.gz
+            cdhash.txt
+            requirement.txt
+
+  linux:
+    needs: version
+    strategy:
+      matrix:
+        include:
+          - { runner: ubuntu-22.04, arch: x86_64 }
+          - { runner: ubuntu-22.04-arm, arch: aarch64 }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      # SDL loads X11, Wayland and PipeWire at run time; it needs their headers to build those backends.
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake pkg-config libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev \
+            libxss-dev libwayland-dev wayland-protocols libxkbcommon-dev libdecor-0-dev libpipewire-0.3-dev libgl1-mesa-dev
+      - name: Build
+        run: |
+          cd helper
+          cargo build --locked --release
+          v=${{ needs.version.outputs.version }}
+          tar -czf "../logos-qr-helper-$v-linux-${{ matrix.arch }}.tar.gz" -C target/release logos-qr-helper
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.arch }}
+          path: logos-qr-helper-*.tar.gz
+
+  windows:
+    needs: version
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      - name: Build, with the C runtime linked in
+        shell: bash
+        env:
+          RUSTFLAGS: "-C target-feature=+crt-static"
+        run: |
+          cd helper
+          cargo build --locked --release
+          v=${{ needs.version.outputs.version }}
+          tar -czf "../logos-qr-helper-$v-windows-x86_64.tar.gz" -C target/release logos-qr-helper.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: logos-qr-helper-*.tar.gz
+
+  release:
+    needs: [version, macos, linux, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Manifest
+        run: |
+          cd dist
+          v=${{ needs.version.outputs.version }}
+          {
+            echo '{'
+            echo "  \"version\": \"$v\","
+            echo "  \"macos_cdhash\": \"$(cat cdhash.txt)\","
+            echo "  \"macos_requirement\": $(python3 -c 'import json,sys; print(json.dumps(open("requirement.txt").read().strip()))'),"
+            echo '  "sha256": {'
+            first=1
+            for f in *.tar.gz; do
+              [ $first = 1 ] || echo ','
+              printf '    "%s": "%s"' "$f" "$(sha256sum "$f" | cut -d' ' -f1)"
+              first=0
+            done
+            echo; echo '  }'; echo '}'
+          } > manifest.json
+          cat manifest.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release
+          path: |
+            dist/*.tar.gz
+            dist/manifest.json
+      - name: Draft release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft \
+            --title "Logos QR helper ${{ needs.version.outputs.version }}" \
+            --notes "The Logos QR helper, built and signed once; qr_scanner_module pins it in helper.json." \
+            dist/*.tar.gz dist/manifest.json

@@ -1,0 +1,87 @@
+name: qr-scanner-module Unit Tests
+
+# The module's core (sessions, frames, the terminal presenter) and the helper (protocol, decoders, and
+# fake mode end to end, with a TCP peer for the camera). No camera is needed.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: unit-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  module:
+    name: module (cargo test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # rust-lib's rust-version, the builder's rustc: a pass here can't fail the real build on MSRV.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.89"
+          components: clippy, rustfmt
+      - name: Provide the SDK manifest cargo resolves
+        uses: actions/checkout@v4
+        with:
+          repository: logos-co/logos-rust-sdk
+          path: logos-rust-sdk-src
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust-lib
+      - name: cargo test
+        # Zero tests also reports success, so the count must be above zero.
+        run: |
+          set -o pipefail
+          cd rust-lib
+          cargo test --locked --no-default-features 2>&1 | tee /tmp/unit.log
+          ran=$(grep -oE '^test result: ok\. [0-9]+ passed' /tmp/unit.log | awk '{s+=$4} END {print s+0}')
+          echo "tests run: $ran"
+          [ "$ran" -gt 0 ]
+      - name: clippy and rustfmt
+        run: |
+          cd rust-lib
+          cargo clippy --locked --no-default-features --all-targets -- -D warnings
+          cargo fmt --check
+      - name: Every contract method must be documented
+        run: |
+          methods=$(grep -E '^    fn [a-z_]+\(.*;$' rust-lib/src/glue.rs | grep -oE 'fn [a-z_]+' | awk '{print $2}' | sort -u)
+          missing=0
+          for m in $methods; do
+            grep -q "\`$m\`" docs/specs.md || { echo "UNDOCUMENTED: $m"; missing=1; }
+          done
+          echo "checked $(echo "$methods" | wc -w) contract methods"
+          exit $missing
+
+  helper:
+    name: helper (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.89"
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: helper
+      - name: cargo test (fake mode included)
+        run: |
+          set -o pipefail
+          cd helper
+          cargo test --locked --features fake-device 2>&1 | tee /tmp/unit.log
+          ran=$(grep -oE '^test result: ok\. [0-9]+ passed' /tmp/unit.log | awk '{s+=$4} END {print s+0}')
+          echo "tests run: $ran"
+          [ "$ran" -gt 0 ]
+      - name: clippy and rustfmt
+        run: |
+          cd helper
+          cargo clippy --locked --features fake-device --all-targets -- -D warnings
+          cargo fmt --check
