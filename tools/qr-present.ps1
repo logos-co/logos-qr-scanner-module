@@ -1,5 +1,7 @@
 # Show qr_scanner_module's codes in this console: it draws them, this only prints them, through plain
-# logosctl. While this runs, the module's helper reads the camera without a window. Ctrl-C to stop.
+# logosctl. While this runs, the module's helper reads the camera without a window. A request is shown
+# with the camera off: press Enter once the wallet shows its answer, and again to see the request
+# again. Ctrl-C to stop.
 #   tools\qr-present.ps1 [-Logosctl logosctl.exe]
 param([string]$Logosctl = "logosctl")
 $ErrorActionPreference = "Stop"
@@ -15,6 +17,14 @@ try {
         [Console]::Write($out.TrimEnd("`r", "`n"))
         [Console]::Write("$([char]27)[J")
         Start-Sleep -Milliseconds 200
+        $pressed = $false
+        while ([Console]::KeyAvailable) {
+            [void][Console]::ReadKey($true)
+            $pressed = $true
+        }
+        if ($pressed) {
+            & $Logosctl call qr_scanner_module presenter_press "str:$h" | Out-Null
+        }
     }
 } finally {
     & $Logosctl call qr_scanner_module presenter_detach "str:$h" | Out-Null

@@ -64,6 +64,21 @@ impl State {
     }
 }
 
+/// A session that shows a request and reads its answer does one, then the other: the camera stays
+/// off while the codes are shown, and comes on when the person says the wallet shows its answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Step {
+    Show,
+    Scan,
+}
+
+const SCAN_LABEL: &str = "Scan the answer";
+const BACK_LABEL: &str = "Show the request again";
+const SHOW_HINT: &str =
+    "Scan these codes with your wallet and confirm on it, then press Scan the answer";
+const SCAN_HINT: &str = "Hold your wallet's answer up to the camera";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Problem {
     pub code: String,
@@ -73,6 +88,8 @@ pub struct Problem {
 #[derive(Debug, Serialize)]
 pub struct Poll {
     pub state: State,
+    /// `show` while the request is shown and the camera is off, `scan` once it reads.
+    pub step: Step,
     pub texts: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<Problem>,
@@ -128,6 +145,7 @@ struct Session {
     scan: bool,
     headless: bool,
     state: State,
+    step: Step,
     texts: Vec<String>,
     error: Option<Problem>,
     camera: Option<String>,
@@ -166,6 +184,53 @@ fn token() -> String {
 /// Codes whose helper can't go on.
 fn fatal(code: &str) -> bool {
     code != "bad_command"
+}
+
+fn ask(label: &str, hint: &str) -> String {
+    serde_json::json!({ "op": "ask", "label": label, "hint": hint }).to_string()
+}
+
+impl Session {
+    /// Shows a request and reads its answer, one step at a time.
+    fn two_step(&self) -> bool {
+        self.scan && !self.frames.is_empty()
+    }
+
+    /// The person's word: from the request to its answer, the camera on, or back.
+    fn press(&mut self) -> bool {
+        if !self.two_step() || !self.state.active() {
+            return false;
+        }
+        let Some(h) = self.helper.as_mut() else {
+            return false;
+        };
+        let windowed = !self.headless;
+        let mut lines = Vec::new();
+        match self.step {
+            Step::Show => {
+                self.step = Step::Scan;
+                lines.push(serde_json::json!({ "op": "scan", "hint": SCAN_HINT }).to_string());
+                if windowed {
+                    lines.push(serde_json::json!({ "op": "show", "frames": [] }).to_string());
+                }
+                lines.push(ask(BACK_LABEL, SCAN_HINT));
+            }
+            Step::Scan => {
+                self.step = Step::Show;
+                self.since = Instant::now();
+                lines.push(serde_json::json!({ "op": "stop_scan" }).to_string());
+                if windowed {
+                    let show = serde_json::json!({ "op": "show", "frames": self.frames, "interval_ms": self.interval.as_millis() as u64 });
+                    lines.push(show.to_string());
+                }
+                lines.push(ask(SCAN_LABEL, SHOW_HINT));
+            }
+        }
+        for l in lines {
+            let _ = h.send(&l);
+        }
+        true
+    }
 }
 
 impl Scanner {
@@ -233,6 +298,11 @@ impl Scanner {
                 scan: p.scan,
                 headless,
                 state: State::Starting,
+                step: if show.parts.is_empty() {
+                    Step::Scan
+                } else {
+                    Step::Show
+                },
                 texts: Vec::new(),
                 error: None,
                 camera: None,
@@ -285,7 +355,10 @@ impl Scanner {
             let show = serde_json::json!({ "op": "show", "frames": frames, "interval_ms": interval.as_millis() as u64 });
             sent = sent.and_then(|_| helper.send(&show.to_string()));
         }
-        if scan {
+        if scan && !frames.is_empty() {
+            // The request first, the camera off, until the person says the answer is up.
+            sent = sent.and_then(|_| helper.send(&ask(SCAN_LABEL, SHOW_HINT)));
+        } else if scan {
             sent = sent.and_then(|_| {
                 helper.send(&serde_json::json!({ "op": "scan", "hint": hint }).to_string())
             });
@@ -319,6 +392,7 @@ impl Scanner {
             s.polled = Instant::now();
             Poll {
                 state: s.state,
+                step: s.step,
                 texts: std::mem::take(&mut s.texts),
                 error: s.error.clone(),
                 camera: s.camera.clone(),
@@ -380,6 +454,26 @@ impl Scanner {
         }
     }
 
+    /// A key pressed in the presenter's terminal: from the request to its answer, or back. Whether
+    /// a session took it.
+    pub fn presenter_press(&self, handle: &str) -> Result<bool, ScanError> {
+        let (pressed, id) = {
+            let mut inner = self.lock();
+            match inner.presenter.as_mut() {
+                Some(p) if p.handle == handle => p.seen = Instant::now(),
+                _ => return Err(ScanError::NotAuthorized),
+            }
+            match inner.session.as_mut() {
+                Some(s) => (s.press(), s.id.clone()),
+                None => (false, String::new()),
+            }
+        };
+        if pressed {
+            self.notify.changed(&id, State::Running.as_str());
+        }
+        Ok(pressed)
+    }
+
     pub fn presenter_render(
         &self,
         handle: &str,
@@ -398,20 +492,27 @@ impl Scanner {
         let Some(s) = inner.session.as_ref().filter(|s| s.state.active()) else {
             return Ok("Waiting for a QR session... (Ctrl-C to stop)".into());
         };
+        let hint = match (s.two_step(), s.step) {
+            (true, Step::Show) => Some(
+                "Scan these codes with your wallet and confirm on it, then press Enter to scan its answer",
+            ),
+            (true, Step::Scan) => Some(
+                "Hold your wallet's answer up to the camera. Enter shows the request again",
+            ),
+            (false, _) => s.hint.as_deref(),
+        };
         let mut status = s.title.clone();
-        if let Some(h) = &s.hint {
+        if let Some(h) = hint {
             status = format!("{status}: {h}");
         }
         if let Some((got, of)) = s.progress {
             status = format!("{status}  -  read {got} of {of}");
         }
-        if s.frames.is_empty() || !s.headless {
-            let place = if s.headless {
-                "the camera"
-            } else {
-                "the Logos QR window"
-            };
-            return Ok(format!("{status}\nContinue in {place}."));
+        if !s.headless {
+            return Ok(format!("{status}\nContinue in the Logos QR window."));
+        }
+        if s.frames.is_empty() || s.step == Step::Scan {
+            return Ok(format!("{status}\nThe camera is on."));
         }
         let i = (s.since.elapsed().as_millis() / s.interval.as_millis().max(1)) as usize
             % s.frames.len();
@@ -437,8 +538,11 @@ fn on_event(inner: &Weak<Mutex<Inner>>, notify: &dyn Notify, id: &str, ev: Helpe
         let Some(s) = inner.session.as_mut().filter(|s| s.id == id) else {
             return;
         };
-        let before = s.state;
+        let before = (s.state, s.step);
         match ev {
+            HelperEvent::Pressed => {
+                s.press();
+            }
             HelperEvent::Ready { .. } => {
                 if s.state == State::Starting {
                     s.state = State::Running;
@@ -467,7 +571,7 @@ fn on_event(inner: &Weak<Mutex<Inner>>, notify: &dyn Notify, id: &str, ev: Helpe
                 }
             }
         }
-        (s.state != before || !s.texts.is_empty()).then_some(s.state)
+        ((s.state, s.step) != before || !s.texts.is_empty()).then_some(s.state)
     };
     if let Some(state) = changed {
         notify.changed(id, state.as_str());
@@ -550,9 +654,30 @@ mod tests {
         let sent = fake.sent.lock().unwrap().clone();
         assert!(sent[0].contains(r#""op":"title""#) && sent[0].contains("Sign (qr_signer_module)"));
         assert!(sent[1].contains(r#""op":"show""#));
-        assert!(sent[2].contains(r#""op":"scan""#));
+        // The request first, the camera off, and a button for when the answer is up.
+        assert!(sent[2].contains(r#""op":"ask""#) && sent[2].contains("Scan the answer"));
+        assert_eq!(sent.len(), 3);
+        assert_eq!(sc.poll(&id, &token).unwrap().step, Step::Show);
 
         fake.emit(HelperEvent::Ready { window: true });
+        fake.emit(HelperEvent::Pressed);
+        let sent = fake.sent.lock().unwrap()[3..].to_vec();
+        assert!(sent[0].contains(r#""op":"scan""#));
+        assert!(
+            sent[1].contains(r#""frames":[]"#),
+            "the codes go: {}",
+            sent[1]
+        );
+        assert!(sent[2].contains("Show the request again"));
+        assert_eq!(sc.poll(&id, &token).unwrap().step, Step::Scan);
+        // And back: the camera off, the codes again.
+        fake.emit(HelperEvent::Pressed);
+        let sent = fake.sent.lock().unwrap()[6..].to_vec();
+        assert!(sent[0].contains(r#""op":"stop_scan""#));
+        assert!(sent[1].contains(r#""bits""#));
+        assert_eq!(sc.poll(&id, &token).unwrap().step, Step::Show);
+        fake.emit(HelperEvent::Pressed);
+
         fake.emit(HelperEvent::Text {
             text: "UR:CRYPTO-PSBT/1-2/X".into(),
         });
@@ -649,6 +774,35 @@ mod tests {
             .any(|l| l.contains(r#""op":"show""#)));
         let text = sc.presenter_render(&h, 100, 50).unwrap();
         assert!(text.contains("\x1b[48;5;16m"), "{text}");
+        assert!(text.contains("press Enter to scan its answer"), "{text}");
+        assert!(!fake
+            .sent
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|l| l.contains(r#""op":"scan""#)));
+        // Enter in the terminal: the camera on, the code gone.
+        assert_eq!(sc.presenter_press(&h), Ok(true));
+        assert!(fake
+            .sent
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|l| l.contains(r#""op":"scan""#)));
+        let text = sc.presenter_render(&h, 100, 50).unwrap();
+        assert!(
+            text.contains("The camera is on.") && !text.contains("\x1b[48;5;16m"),
+            "{text}"
+        );
+        assert_eq!(sc.presenter_press(&h), Ok(true));
+        assert!(sc
+            .presenter_render(&h, 100, 50)
+            .unwrap()
+            .contains("\x1b[48;5;16m"));
+        assert_eq!(
+            sc.presenter_press("prs_0.nope"),
+            Err(ScanError::NotAuthorized)
+        );
         assert!(sc.presenter_render("prs_0.nope", 100, 50).is_err());
         let p = sc.poll(&id, &token).unwrap();
         assert!(p.presenter);

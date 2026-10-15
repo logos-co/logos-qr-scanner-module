@@ -26,11 +26,18 @@ and to someone else's is the same: `not authorized`.
 
 A session nobody polls for 30 seconds has lost its caller: the next `start` ends it.
 
+**Show, then scan.** A session that shows a request and reads its answer does one, then the other, so the
+camera is on no longer than it has to be. The request is shown with the camera off. When the wallet shows its
+answer, the person presses **Scan the answer** in the window (or Enter or Space there), or Enter in the
+terminal presenter: the camera comes on and the request's codes go. **Show the request again** (or Enter
+again) turns the camera off and shows them again. A session that only scans, such as reading a wallet's
+account code, opens the camera at once.
+
 | Method | Parameters | Answer |
 |---|---|---|
 | `scanner_info` | | `{ ok, version, helper }`: this module's version, and the path of the helper it runs once one has started |
-| `start` | `{ title?, show?: { parts, interval_ms?, max_version? }, scan, hint? }` | `{ ok, session, token }`. `parts` are shown as QR codes in turn, `interval_ms` each (200 by default), each at most version `max_version` (25 by default), error correction L. `scan` opens the camera. The caller's module name is added to the title |
-| `poll` | `session, token` | `{ ok, state, texts, error?, camera?, presenter, presenter_max_version? }`. `texts` holds each new code's text once. `state` is `starting`, `running`, `cancelled` (the person pressed Cancel), `failed` (with `error`) or `stopped` |
+| `start` | `{ title?, show?: { parts, interval_ms?, max_version? }, scan, hint? }` | `{ ok, session, token }`. `parts` are shown as QR codes in turn, `interval_ms` each (200 by default), each at most version `max_version` (25 by default), error correction L. `scan` opens the camera: at once when nothing is shown, else once the person presses. The caller's module name is added to the title; `hint` is the window's line while only scanning |
+| `poll` | `session, token` | `{ ok, state, step, texts, error?, camera?, presenter, presenter_max_version? }`. `texts` holds each new code's text once. `state` is `starting`, `running`, `cancelled` (the person pressed Cancel), `failed` (with `error`) or `stopped`. `step` is `show` while a request is shown and the camera is off, then `scan` |
 | `progress` | `session, token, { received, expected }` | `{ ok }`. Shown under the camera's picture |
 | `stop` | `session, token` | `{ ok }`. Closes the helper |
 
@@ -53,7 +60,8 @@ module draws them; `tools/qr-present` and `tools/qr-present.ps1` only print what
 | Method | Parameters | Answer |
 |---|---|---|
 | `presenter_attach` | | A handle, as plain text |
-| `presenter_render` | `handle, cols, rows` | The frame due now, as plain text: each module two spaces painted black or white (256-colour background codes) on one row, so about square and drawn by no font; then a status line. Each call renews the presenter's claim |
+| `presenter_render` | `handle, cols, rows` | The frame due now, as plain text: each module two spaces painted black or white (256-colour background codes) on one row, so about square and drawn by no font; then a status line. While the camera reads, a status line only. Each call renews the presenter's claim |
+| `presenter_press` | `handle` | `pressed`, or `nothing to press`: a key pressed in the terminal moves the session from its request to its answer, or back |
 | `presenter_detach` | `handle` | `detached` |
 
 While a presenter rendered in the last 10 seconds, new sessions start the helper with `--no-window`: the
@@ -67,8 +75,10 @@ when its standard input does, so it never outlives its module.
 
 | Command | Fields |
 |---|---|
-| `show` | `title?, frames: [{ size, bits }], interval_ms` |
-| `scan` | `title?, hint?` |
+| `show` | `title?, frames: [{ size, bits }], interval_ms`; no frames hides them |
+| `scan` | `title?, hint?`: open the camera |
+| `stop_scan` | Close the camera |
+| `ask` | `label?, hint?`: a button that reports `pressed` when clicked, or on Enter or Space; no label removes it. `hint` replaces the first line |
 | `progress` | `received, expected` |
 | `title` | `title` |
 | `close` | |
@@ -78,6 +88,7 @@ when its standard input does, so it never outlives its module.
 | `ready` | `version, window, fake` |
 | `camera` | `name` |
 | `text` | `text`, once per distinct text |
+| `pressed` | The button `ask` put up |
 | `cancelled` | |
 | `error` | `code, message` |
 
@@ -88,8 +99,9 @@ when its standard input does, so it never outlives its module.
 - **Window.** SDL3's renderer: the frames, the camera's picture framed green while a code is in view, the
   status, and Cancel (or Escape).
 - **Fake mode.** `LOGOS_QR_HELPER_FAKE=host:port` replaces the camera and the window with a TCP peer: it is
-  sent `{"show": {frames, interval_ms}}` and `{"scan": true}` lines, and sends `raster <w> <h>\n` followed by
-  `w*h` grayscale bytes for the decoders to read.
+  sent `{"show": {frames, interval_ms}}` and `{"scan": true}` / `{"scan": false}` lines, and sends `raster
+  <w> <h>\n` followed by `w*h` grayscale bytes for the decoders to read (only while the camera is on), and
+  `press\n` where a person would press the window's button.
 - **`LOGOS_QR_HELPER`** makes this module run another helper, for development.
 
 ## Packaging

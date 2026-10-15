@@ -18,7 +18,8 @@ pub trait QrScannerModule: Send + Sync + 'static {
     /// Start a session: `{ title?, show?: { parts, interval_ms?, max_version? }, scan, hint? }` →
     /// `{ ok, session, token }`.
     fn start(&self, params_json: String) -> String;
-    /// `{ ok, state, texts, error?, camera?, presenter, presenter_max_version? }`; texts once each.
+    /// `{ ok, state, step, texts, error?, camera?, presenter, presenter_max_version? }`; texts once
+    /// each. `step` is `show` while a request is shown and the camera is off, then `scan`.
     fn poll(&self, session: String, token: String) -> String;
     /// What the caller made of the codes so far: `{ received, expected }`.
     fn progress(&self, session: String, token: String, params_json: String) -> String;
@@ -29,6 +30,9 @@ pub trait QrScannerModule: Send + Sync + 'static {
     fn presenter_attach(&self) -> String;
     /// The frame due now, as terminal text; each call renews the presenter's claim.
     fn presenter_render(&self, handle: String, cols: i64, rows: i64) -> String;
+    /// A key pressed in the terminal: from the request shown to reading its answer, or back.
+    /// `pressed`, or `nothing to press` when no session shows a request and reads its answer.
+    fn presenter_press(&self, handle: String) -> String;
     fn presenter_detach(&self, handle: String) -> String;
 
     fn on_context_ready(&self, _ctx: &RustModuleContext) {}
@@ -155,6 +159,14 @@ impl QrScannerModule for QrScannerModuleImpl {
         let (cols, rows) = (cols.clamp(10, 1000) as usize, rows.clamp(5, 1000) as usize);
         match self.scanner.presenter_render(&handle, cols, rows) {
             Ok(text) => text,
+            Err(e) => format!("error: {}", e.message()),
+        }
+    }
+
+    fn presenter_press(&self, handle: String) -> String {
+        match self.scanner.presenter_press(&handle) {
+            Ok(true) => "pressed".into(),
+            Ok(false) => "nothing to press".into(),
             Err(e) => format!("error: {}", e.message()),
         }
     }

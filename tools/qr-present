@@ -1,6 +1,8 @@
 #!/bin/sh
 # Show qr_scanner_module's codes in this terminal: it draws them, this only prints them, through plain
-# logosctl. While this runs, the module's helper reads the camera without a window. Ctrl-C to stop.
+# logosctl. While this runs, the module's helper reads the camera without a window. A request is shown
+# with the camera off: press Enter once the wallet shows its answer, and again to see the request
+# again. Ctrl-C to stop.
 #   tools/qr-present [logosctl]
 ctl=${1:-logosctl}
 
@@ -13,11 +15,30 @@ size() {
     esac
 }
 
+# Keys arrive one at a time, unechoed, and a read gives up after 0.2 s: that is the frame rate too.
+saved=$(stty -g </dev/tty 2>/dev/null)
+if [ -n "$saved" ] && stty -icanon -echo min 0 time 2 </dev/tty 2>/dev/null; then
+    keys=yes
+else
+    keys=
+fi
+
 h=$("$ctl" --human call qr_scanner_module presenter_attach) || exit 1
-trap '"$ctl" call qr_scanner_module presenter_detach "str:$h" >/dev/null 2>&1; printf "\033[0m\033[?25h\n"; exit 0' INT TERM HUP
+restore() {
+    "$ctl" call qr_scanner_module presenter_detach "str:$h" >/dev/null 2>&1
+    [ -n "$keys" ] && stty "$saved" </dev/tty 2>/dev/null
+    printf '\033[0m\033[?25h\n'
+}
+trap 'restore; exit 0' INT TERM HUP
 printf '\033[2J\033[?25l'
 while set -- $(size) && out=$("$ctl" --human call qr_scanner_module presenter_render "str:$h" "$2" "$1"); do
     printf '\033[H%s\033[J' "$out"
-    sleep 0.2
+    if [ -n "$keys" ]; then
+        if [ "$(dd bs=1 count=1 </dev/tty 2>/dev/null | wc -c | tr -d ' ')" != 0 ]; then
+            "$ctl" call qr_scanner_module presenter_press "str:$h" >/dev/null 2>&1
+        fi
+    else
+        sleep 0.2
+    fi
 done
-printf '\033[0m\033[?25h\n'
+restore

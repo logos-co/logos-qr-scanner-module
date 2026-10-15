@@ -34,6 +34,7 @@ enum Msg {
     Seen { preview: Option<Gray>, any: bool },
     Camera(String),
     CameraFailed(CameraError),
+    Pressed,
 }
 
 struct Scan {
@@ -143,6 +144,8 @@ struct State {
     seen_at: Option<Instant>,
     camera: Option<String>,
     problem: Option<String>,
+    /// The button `ask` put up.
+    ask: Option<String>,
 }
 
 impl State {
@@ -192,10 +195,13 @@ fn main() {
     let (tx, rx) = mpsc::channel::<Msg>();
     read_commands(tx.clone());
 
-    let mut fake: Option<(FakeLink, Option<FakeCamera>)> = None;
+    let mut fake: Option<(FakeLink, FakeCamera)> = None;
     if let Ok(addr) = std::env::var("LOGOS_QR_HELPER_FAKE") {
-        match camera::fake(&addr) {
-            Ok((link, cam)) => fake = Some((link, Some(cam))),
+        let press = tx.clone();
+        match camera::fake(&addr, move || {
+            let _ = press.send(Msg::Pressed);
+        }) {
+            Ok(f) => fake = Some(f),
             Err(e) => {
                 out.error("fake_failed", format!("{addr}: {e}"));
                 return;
@@ -232,20 +238,19 @@ fn main() {
         ..State::default()
     };
     let mut scanning: Option<Scan> = None;
-    let start_scan = |scanning: &mut Option<Scan>,
-                      fake: &mut Option<(FakeLink, Option<FakeCamera>)>,
-                      preview: bool| {
-        if scanning.is_some() {
-            return;
-        }
-        let cam = fake.as_mut().and_then(|(link, cam)| {
-            link.scanning();
-            cam.take()
-        });
-        *scanning = Some(scan(out.clone(), tx.clone(), cam, preview));
-    };
+    let start_scan =
+        |scanning: &mut Option<Scan>, fake: &Option<(FakeLink, FakeCamera)>, preview: bool| {
+            if scanning.is_some() {
+                return;
+            }
+            let cam = fake.as_ref().map(|(link, cam)| {
+                link.scanning(true);
+                cam.clone()
+            });
+            *scanning = Some(scan(out.clone(), tx.clone(), cam, preview));
+        };
     if probe {
-        start_scan(&mut scanning, &mut fake, win.is_some());
+        start_scan(&mut scanning, &fake, win.is_some());
     }
 
     'main: loop {
@@ -268,6 +273,14 @@ fn main() {
                         if let Some(s) = &scanning {
                             s.switch.store(true, Ordering::Relaxed);
                         }
+                    }
+                    let key = |k| t == SDL_EVENT_KEY_DOWN && ev.key.key == k;
+                    let pressed = (t == SDL_EVENT_MOUSE_BUTTON_DOWN
+                        && w.hits_ask(ev.button.x, ev.button.y))
+                        || (st.ask.is_some()
+                            && (key(SDLK_RETURN) || key(SDLK_KP_ENTER) || key(SDLK_SPACE)));
+                    if pressed {
+                        out.send(&Event::Pressed);
                     }
                 }
             }
@@ -323,8 +336,27 @@ fn main() {
                     }
                     st.hint = hint;
                     let preview = win.is_some();
-                    start_scan(&mut scanning, &mut fake, preview);
+                    start_scan(&mut scanning, &fake, preview);
                 }
+                Msg::Cmd(Command::StopScan) => {
+                    if let Some(s) = scanning.take() {
+                        s.stop.store(true, Ordering::Relaxed);
+                        let _ = s.worker.join();
+                    }
+                    if let Some((link, _)) = &fake {
+                        link.scanning(false);
+                    }
+                    st.preview = None;
+                    st.camera = None;
+                    st.seen_at = None;
+                }
+                Msg::Cmd(Command::Ask { label, hint }) => {
+                    st.ask = label;
+                    if hint.is_some() {
+                        st.hint = hint;
+                    }
+                }
+                Msg::Pressed => out.send(&Event::Pressed),
                 Msg::Cmd(Command::Progress { received, expected }) => {
                     st.progress = Some((received, expected))
                 }
@@ -366,6 +398,7 @@ fn main() {
                 scanning: scanning.is_some(),
                 seeing,
                 lines: &lines,
+                ask: st.ask.as_deref(),
             });
         }
     }

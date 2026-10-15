@@ -1,5 +1,6 @@
 //! The helper's window, drawn with SDL3's renderer and its built-in 8x8 font: the frames to show,
-//! the camera's picture for aiming, what has been read so far, and Cancel. No Qt.
+//! the camera's picture for aiming, what has been read so far, the button the module asks for, and
+//! Cancel. No Qt.
 
 use std::ffi::CString;
 use std::ptr::{null, null_mut};
@@ -16,6 +17,8 @@ pub struct View<'a> {
     /// A code was in the camera's view a moment ago.
     pub seeing: bool,
     pub lines: &'a [String],
+    /// The label of a button the module asked for.
+    pub ask: Option<&'a str>,
 }
 
 pub struct Window {
@@ -24,9 +27,16 @@ pub struct Window {
     tex: *mut SDL_Texture,
     tex_size: (i32, i32),
     cancel: SDL_FRect,
+    ask: SDL_FRect,
 }
 
 const BAR: f32 = 64.0;
+const NONE: SDL_FRect = SDL_FRect {
+    x: 0.0,
+    y: 0.0,
+    w: 0.0,
+    h: 0.0,
+};
 
 fn cstr(s: &str) -> CString {
     CString::new(s.replace('\0', " ")).unwrap_or_default()
@@ -62,12 +72,8 @@ impl Window {
             ren,
             tex: null_mut(),
             tex_size: (0, 0),
-            cancel: SDL_FRect {
-                x: 0.0,
-                y: 0.0,
-                w: 0.0,
-                h: 0.0,
-            },
+            cancel: NONE,
+            ask: NONE,
         })
     }
 
@@ -78,8 +84,11 @@ impl Window {
     }
 
     pub fn hits_cancel(&self, x: f32, y: f32) -> bool {
-        let c = &self.cancel;
-        x >= c.x && x <= c.x + c.w && y >= c.y && y <= c.y + c.h
+        hits(&self.cancel, x, y)
+    }
+
+    pub fn hits_ask(&self, x: f32, y: f32) -> bool {
+        hits(&self.ask, x, y)
     }
 
     pub fn draw(&mut self, v: &View) {
@@ -115,15 +124,44 @@ impl Window {
                 (None, false) => {}
             }
 
-            for (i, line) in v.lines.iter().take(2).enumerate() {
-                self.text(16.0, h - BAR + 8.0 + i as f32 * 24.0, line, (230, 232, 235));
-            }
             self.cancel = SDL_FRect {
                 x: w - 136.0,
                 y: h - BAR + 12.0,
                 w: 120.0,
                 h: 40.0,
             };
+            // The font is 16 pixels a character at this scale.
+            self.ask = match v.ask {
+                Some(label) => {
+                    let bw = 16.0 * label.chars().count() as f32 + 24.0;
+                    SDL_FRect {
+                        x: self.cancel.x - bw - 12.0,
+                        w: bw,
+                        ..self.cancel
+                    }
+                }
+                None => NONE,
+            };
+            let room = if v.ask.is_some() {
+                self.ask.x
+            } else {
+                self.cancel.x
+            } - 24.0;
+            let fit = (room / 16.0).max(0.0) as usize;
+            for (i, line) in v.lines.iter().take(2).enumerate() {
+                let line: String = line.chars().take(fit).collect();
+                self.text(
+                    16.0,
+                    h - BAR + 8.0 + i as f32 * 24.0,
+                    &line,
+                    (230, 232, 235),
+                );
+            }
+            if let Some(label) = v.ask {
+                SDL_SetRenderDrawColor(self.ren, 46, 120, 220, 255);
+                SDL_RenderFillRect(self.ren, &self.ask);
+                self.text(self.ask.x + 12.0, self.ask.y + 12.0, label, (255, 255, 255));
+            }
             SDL_SetRenderDrawColor(self.ren, 90, 96, 104, 255);
             SDL_RenderFillRect(self.ren, &self.cancel);
             self.text(
@@ -237,6 +275,10 @@ impl Window {
         SDL_RenderDebugText(self.ren, x / 2.0, y / 2.0, t.as_ptr());
         SDL_SetRenderScale(self.ren, 1.0, 1.0);
     }
+}
+
+fn hits(r: &SDL_FRect, x: f32, y: f32) -> bool {
+    r.w > 0.0 && x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h
 }
 
 impl Drop for Window {

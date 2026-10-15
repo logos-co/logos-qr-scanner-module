@@ -53,6 +53,16 @@ pub enum Command {
         #[serde(default)]
         hint: Option<String>,
     },
+    /// Close the camera.
+    StopScan,
+    /// A button that reports `pressed` when clicked, or on Enter or Space; no label removes it.
+    /// `hint` replaces the window's first line.
+    Ask {
+        #[serde(default)]
+        label: Option<String>,
+        #[serde(default)]
+        hint: Option<String>,
+    },
     /// What the caller made of the codes so far, for the window.
     Progress {
         received: u32,
@@ -78,6 +88,8 @@ pub enum Event {
     Text {
         text: String,
     },
+    /// The person pressed the button `ask` put up.
+    Pressed,
     Cancelled,
     Error {
         code: &'static str,
@@ -131,6 +143,17 @@ mod tests {
             serde_json::from_str(r#"{"op":"close"}"#).unwrap(),
             Command::Close
         ));
+        assert!(matches!(
+            serde_json::from_str(r#"{"op":"stop_scan"}"#).unwrap(),
+            Command::StopScan
+        ));
+        match serde_json::from_str(r#"{"op":"ask","label":"Scan the answer"}"#).unwrap() {
+            Command::Ask { label, hint } => {
+                assert_eq!(label.as_deref(), Some("Scan the answer"));
+                assert_eq!(hint, None);
+            }
+            other => panic!("{other:?}"),
+        }
         assert!(serde_json::from_str::<Command>(r#"{"op":"nope"}"#).is_err());
     }
 
@@ -169,5 +192,9 @@ mod tests {
         })
         .unwrap();
         assert_eq!(s, r#"{"ev":"text","text":"UR:X"}"#);
+        assert_eq!(
+            serde_json::to_string(&Event::Pressed).unwrap(),
+            r#"{"ev":"pressed"}"#
+        );
     }
 }

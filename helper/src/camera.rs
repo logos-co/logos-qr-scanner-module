@@ -5,6 +5,8 @@ use std::ffi::CStr;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::ptr::{null, null_mut};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -255,50 +257,87 @@ impl Source for SdlCamera {
     }
 }
 
-/// Fake mode: a TCP peer plays the device. It is told what the window would show, and sends the
-/// pictures the camera would see as `raster <w> <h>\n` followed by `w*h` grayscale bytes.
+/// Fake mode: a TCP peer plays the device. It is told what the window would show and when the
+/// camera is on, sends the pictures the camera would see as `raster <w> <h>\n` followed by `w*h`
+/// grayscale bytes, and `press\n` where a person would press the window's button.
 #[derive(Clone)]
 pub struct FakeLink {
     writer: Arc<Mutex<TcpStream>>,
+    scanning: Arc<AtomicBool>,
 }
 
+/// The pictures the peer sends while the camera is on; one reader thread takes them off the link.
+#[derive(Clone)]
 pub struct FakeCamera {
-    reader: BufReader<TcpStream>,
+    pictures: Arc<Mutex<Receiver<Gray>>>,
 }
 
-pub fn fake(addr: &str) -> std::io::Result<(FakeLink, FakeCamera)> {
+/// Connect to the peer. `on_press` runs, on the reader thread, for each press it sends.
+pub fn fake(
+    addr: &str,
+    on_press: impl Fn() + Send + 'static,
+) -> std::io::Result<(FakeLink, FakeCamera)> {
     let stream = TcpStream::connect(addr)?;
     stream.set_nodelay(true)?;
-    stream.set_read_timeout(Some(Duration::from_millis(100)))?;
-    let writer = Arc::new(Mutex::new(stream.try_clone()?));
+    let link = FakeLink {
+        writer: Arc::new(Mutex::new(stream.try_clone()?)),
+        scanning: Arc::new(AtomicBool::new(false)),
+    };
+    let (tx, rx) = mpsc::channel();
+    let scanning = link.scanning.clone();
+    let mut reader = BufReader::new(stream);
+    std::thread::spawn(move || loop {
+        let mut line = String::new();
+        if !matches!(reader.read_line(&mut line), Ok(n) if n > 0) {
+            return;
+        }
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        match parts.as_slice() {
+            ["press"] => on_press(),
+            ["raster", w, h] => {
+                let (w, h) = (
+                    w.parse::<usize>().unwrap_or(0),
+                    h.parse::<usize>().unwrap_or(0),
+                );
+                if w == 0 || h == 0 || w * h > 4096 * 4096 {
+                    return;
+                }
+                let mut px = vec![0u8; w * h];
+                if reader.read_exact(&mut px).is_err() {
+                    return;
+                }
+                // A picture taken while the camera is off is never seen.
+                if scanning.load(Ordering::Relaxed) && tx.send(Gray { w, h, px }).is_err() {
+                    return;
+                }
+            }
+            _ => return,
+        }
+    });
     Ok((
-        FakeLink { writer },
+        link,
         FakeCamera {
-            reader: BufReader::new(stream),
+            pictures: Arc::new(Mutex::new(rx)),
         },
     ))
 }
 
 impl FakeLink {
     pub fn shown(&self, frames: &[Frame], interval_ms: u64) {
-        let line = serde_json::json!({ "show": { "frames": frames, "interval_ms": interval_ms } });
+        self.say(serde_json::json!({ "show": { "frames": frames, "interval_ms": interval_ms } }));
+    }
+
+    /// The camera turned on or off.
+    pub fn scanning(&self, on: bool) {
+        self.scanning.store(on, Ordering::Relaxed);
+        self.say(serde_json::json!({ "scan": on }));
+    }
+
+    fn say(&self, line: serde_json::Value) {
         let mut w = self.writer.lock().unwrap_or_else(|e| e.into_inner());
         let _ = writeln!(w, "{line}");
         let _ = w.flush();
     }
-
-    pub fn scanning(&self) {
-        let mut w = self.writer.lock().unwrap_or_else(|e| e.into_inner());
-        let _ = writeln!(w, "{}", serde_json::json!({ "scan": true }));
-        let _ = w.flush();
-    }
-}
-
-fn timed_out(e: &std::io::Error) -> bool {
-    matches!(
-        e.kind(),
-        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-    )
 }
 
 impl Source for FakeCamera {
@@ -307,34 +346,13 @@ impl Source for FakeCamera {
     }
 
     fn next(&mut self) -> Result<Option<Gray>, CameraError> {
-        let mut header = String::new();
-        match self.reader.read_line(&mut header) {
-            Ok(0) => return Err(CameraError::Failed("the fake device went away".into())),
-            Ok(_) => {}
-            Err(e) if timed_out(&e) => return Ok(None),
-            Err(e) => return Err(CameraError::Failed(e.to_string())),
-        }
-        let parts: Vec<&str> = header.split_whitespace().collect();
-        let (w, h) = match parts.as_slice() {
-            ["raster", w, h] => (
-                w.parse::<usize>().unwrap_or(0),
-                h.parse::<usize>().unwrap_or(0),
-            ),
-            _ => return Err(CameraError::Failed(format!("fake device sent {header:?}"))),
-        };
-        if w == 0 || h == 0 || w * h > 4096 * 4096 {
-            return Err(CameraError::Failed(format!("fake raster {w}x{h}")));
-        }
-        let mut px = vec![0u8; w * h];
-        let mut got = 0;
-        while got < px.len() {
-            match self.reader.read(&mut px[got..]) {
-                Ok(0) => return Err(CameraError::Failed("the fake device went away".into())),
-                Ok(n) => got += n,
-                Err(e) if timed_out(&e) => continue,
-                Err(e) => return Err(CameraError::Failed(e.to_string())),
+        let rx = self.pictures.lock().unwrap_or_else(|e| e.into_inner());
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(g) => Ok(Some(g)),
+            Err(RecvTimeoutError::Timeout) => Ok(None),
+            Err(RecvTimeoutError::Disconnected) => {
+                Err(CameraError::Failed("the fake device went away".into()))
             }
         }
-        Ok(Some(Gray { w, h, px }))
     }
 }

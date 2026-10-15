@@ -1,11 +1,14 @@
 //! qr-fake-device: the other end of the helper's fake mode, for doctests. It prints the address it
-//! listens on, logs every line the helper sends (what its window would show), and once the helper
-//! scans, shows it each `--say` text as a picture of a QR code, over and over.
+//! listens on, logs every line the helper sends (what its window would show), presses the window's
+//! button after each show, and while the helper scans, shows it each `--say` text as a picture of a
+//! QR code, over and over.
 //!
 //!   qr-fake-device [--listen 127.0.0.1:0] [--say TEXT]... [--log FILE]
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use qrcodegen::{QrCode, QrCodeEcc};
@@ -47,7 +50,9 @@ fn main() {
     let _ = std::io::stdout().flush();
     for conn in listener.incoming() {
         let Ok(stream) = conn else { continue };
-        let mut writer = stream.try_clone().expect("clone");
+        // One writer for presses and pictures, so a press never lands inside a picture.
+        let writer = Arc::new(Mutex::new(stream.try_clone().expect("clone")));
+        let on = Arc::new(AtomicBool::new(false));
         let say = say.clone();
         let mut log = log.as_ref().map(|p| {
             std::fs::OpenOptions::new()
@@ -62,22 +67,36 @@ fn main() {
                 if let Some(f) = log.as_mut() {
                     let _ = writeln!(f, "{line}");
                 }
-                if line.contains(r#""scan":true"#) && !say.is_empty() {
-                    let mut w = writer.try_clone().expect("clone");
-                    let say = say.clone();
-                    std::thread::spawn(move || loop {
-                        for text in &say {
-                            let (cw, ch, px) = raster(text);
-                            if writeln!(w, "raster {cw} {ch}").is_err() || w.write_all(&px).is_err()
-                            {
-                                return;
+                // A person scans the codes shown, then presses the window's button.
+                if line.contains(r#""show""#) && !line.contains(r#""frames":[]"#) {
+                    let mut w = writer.lock().unwrap();
+                    let _ = writeln!(w, "press");
+                }
+                if line.contains(r#""scan":false"#) {
+                    on.store(false, Ordering::Relaxed);
+                }
+                if line.contains(r#""scan":true"#)
+                    && !say.is_empty()
+                    && !on.swap(true, Ordering::Relaxed)
+                {
+                    let (writer, on, say) = (writer.clone(), on.clone(), say.clone());
+                    std::thread::spawn(move || {
+                        while on.load(Ordering::Relaxed) {
+                            for text in &say {
+                                let (cw, ch, px) = raster(text);
+                                let mut w = writer.lock().unwrap();
+                                if writeln!(w, "raster {cw} {ch}").is_err()
+                                    || w.write_all(&px).is_err()
+                                {
+                                    return;
+                                }
+                                drop(w);
+                                std::thread::sleep(Duration::from_millis(200));
                             }
-                            std::thread::sleep(Duration::from_millis(200));
                         }
                     });
                 }
             }
-            let _ = writer.flush();
         });
     }
 }

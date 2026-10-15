@@ -101,6 +101,59 @@ fn shows_frames_and_reads_codes() {
     assert!(helper.wait().unwrap().success());
 }
 
+/// Show first, the camera off; a press; then the camera, and off again.
+#[test]
+fn a_press_comes_back_and_the_camera_turns_off() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let mut helper = Command::new(env!("CARGO_BIN_EXE_logos-qr-helper"))
+        .env("LOGOS_QR_HELPER_FAKE", &addr)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = helper.stdin.take().unwrap();
+    let mut events = BufReader::new(helper.stdout.take().unwrap()).lines();
+    let (mut device, _) = listener.accept().unwrap();
+    device
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let mut seen = BufReader::new(device.try_clone().unwrap()).lines();
+    assert!(events.next().unwrap().unwrap().contains(r#""ev":"ready""#));
+
+    writeln!(
+        stdin,
+        r#"{{"op":"show","frames":[{{"size":2,"bits":"1001"}}]}}"#
+    )
+    .unwrap();
+    writeln!(stdin, r#"{{"op":"ask","label":"Scan the answer"}}"#).unwrap();
+    assert!(seen.next().unwrap().unwrap().contains(r#""show""#));
+    // A picture while the camera is off is never read.
+    let (w, h, px) = raster("UR:BYTES/HDCXDWINVEZM", 4);
+    writeln!(device, "raster {w} {h}").unwrap();
+    device.write_all(&px).unwrap();
+    writeln!(device, "press").unwrap();
+    assert_eq!(events.next().unwrap().unwrap(), r#"{"ev":"pressed"}"#);
+
+    writeln!(stdin, r#"{{"op":"scan"}}"#).unwrap();
+    assert_eq!(seen.next().unwrap().unwrap(), r#"{"scan":true}"#);
+    let (w, h, px) = raster("UR:BYTES/AEADAOLYTOMWGTKP", 4);
+    writeln!(device, "raster {w} {h}").unwrap();
+    device.write_all(&px).unwrap();
+    let text = loop {
+        let line = events.next().unwrap().unwrap();
+        if !line.contains(r#""ev":"camera""#) {
+            break line;
+        }
+    };
+    assert_eq!(text, r#"{"ev":"text","text":"UR:BYTES/AEADAOLYTOMWGTKP"}"#);
+
+    writeln!(stdin, r#"{{"op":"stop_scan"}}"#).unwrap();
+    assert_eq!(seen.next().unwrap().unwrap(), r#"{"scan":false}"#);
+    writeln!(stdin, r#"{{"op":"close"}}"#).unwrap();
+    assert!(helper.wait().unwrap().success());
+}
+
 #[test]
 fn exits_when_its_module_goes() {
     let mut helper = Command::new(env!("CARGO_BIN_EXE_logos-qr-helper"))

@@ -21,6 +21,8 @@ pub enum HelperEvent {
     Text {
         text: String,
     },
+    /// The person pressed the window's button.
+    Pressed,
     Cancelled,
     Error {
         code: String,
@@ -150,6 +152,8 @@ mod tests {
         let e: HelperEvent =
             serde_json::from_str(r#"{"ev":"error","code":"camera_denied","message":"m"}"#).unwrap();
         assert!(matches!(e, HelperEvent::Error { .. }));
+        let e: HelperEvent = serde_json::from_str(r#"{"ev":"pressed"}"#).unwrap();
+        assert_eq!(e, HelperEvent::Pressed);
     }
 
     #[test]

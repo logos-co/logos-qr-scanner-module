@@ -87,7 +87,10 @@ jobs:
         run: |
           set -o pipefail
           cd helper
-          cargo test --locked --features fake-device 2>&1 | tee /tmp/unit.log
+          # zxing-cpp's debug build wants MSVC's debug C runtime, which Rust never links.
+          profile=
+          [ "$RUNNER_OS" = Windows ] && profile=--release
+          cargo test --locked $profile --features fake-device 2>&1 | tee /tmp/unit.log
           ran=$(grep -oE '^test result: ok\. [0-9]+ passed' /tmp/unit.log | awk '{s+=$4} END {print s+0}')
           echo "tests run: $ran"
           [ "$ran" -gt 0 ]
