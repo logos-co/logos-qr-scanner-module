@@ -102,7 +102,11 @@ when its standard input does, so it never outlives its module.
 
 Where `helper.json` pins no release for a system, the module carries a development build from source:
 `co.logos.QRHelper.dev`, ad-hoc signed, for tests. A local build wrapped by `helper/scripts/make-app.sh`
-gets the same `.dev` id, so it never touches the release's grant.
+gets the same `.dev` id, so it never touches the release's grant. On macOS the development build is sealed
+like a release (rcodesign: the hardened runtime, the entitlement, Info.plist bound) and links only the
+system's libraries. That way the portable package carries it unchanged: `nix-bundle-dir` copies a sealed
+`.app` byte for byte and never rewrites or re-signs it. No Windows build is carried until a release
+pins one.
 
 ## By hand
 
