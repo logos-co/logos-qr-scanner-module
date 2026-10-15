@@ -115,7 +115,7 @@ jobs:
           bad=0
           for d in $dlls; do
             case "$d" in
-              api-ms-win-*|advapi32.dll|bcrypt.dll|cfgmgr32.dll|combase.dll|dwmapi.dll|gdi32.dll|hid.dll|imm32.dll|\
+              api-ms-win-*|advapi32.dll|bcrypt.dll|bcryptprimitives.dll|cfgmgr32.dll|combase.dll|dwmapi.dll|gdi32.dll|hid.dll|imm32.dll|\
               kernel32.dll|ntdll.dll|ole32.dll|oleaut32.dll|setupapi.dll|shell32.dll|shlwapi.dll|user32.dll|\
               userenv.dll|uxtheme.dll|version.dll|winmm.dll|ws2_32.dll|mfplat.dll|mf.dll|mfreadwrite.dll) ;;
               *) echo "::error::logos-qr-helper.exe imports $d, which Windows doesn't ship"; bad=1 ;;
