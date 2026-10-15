@@ -139,6 +139,7 @@ jobs:
           RUSTFLAGS: "-C target-feature=+crt-static"
         run: |
           cd helper
+          export CMAKE_TOOLCHAIN_FILE_x86_64_pc_windows_msvc="$(cygpath -m "$PWD/static-crt.cmake")"
           cargo build --locked --release
           v=${{ needs.version.outputs.version }}
           tar -czf "../logos-qr-helper-$v-windows-x86_64.tar.gz" -C target/release logos-qr-helper.exe
