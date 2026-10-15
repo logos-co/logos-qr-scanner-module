@@ -30,7 +30,7 @@ pub struct Window {
     ask: SDL_FRect,
 }
 
-const BAR: f32 = 64.0;
+const BAR: f32 = 112.0;
 const NONE: SDL_FRect = SDL_FRect {
     x: 0.0,
     y: 0.0,
@@ -124,9 +124,10 @@ impl Window {
                 (None, false) => {}
             }
 
+            // Two lines across the window, then the buttons on a row of their own, right-aligned.
             self.cancel = SDL_FRect {
                 x: w - 136.0,
-                y: h - BAR + 12.0,
+                y: h - 56.0,
                 w: 120.0,
                 h: 40.0,
             };
@@ -142,20 +143,11 @@ impl Window {
                 }
                 None => NONE,
             };
-            let room = if v.ask.is_some() {
-                self.ask.x
-            } else {
-                self.cancel.x
-            } - 24.0;
-            let fit = (room / 16.0).max(0.0) as usize;
-            for (i, line) in v.lines.iter().take(2).enumerate() {
-                let line: String = line.chars().take(fit).collect();
-                self.text(
-                    16.0,
-                    h - BAR + 8.0 + i as f32 * 24.0,
-                    &line,
-                    (230, 232, 235),
-                );
+            let fit = ((w - 32.0) / 16.0).max(0.0) as usize;
+            let first = v.lines.first().map_or("", String::as_str);
+            let second = v.lines.get(1).map_or("", String::as_str);
+            for (i, line) in bar_lines(first, second, fit).iter().enumerate() {
+                self.text(16.0, h - BAR + 8.0 + i as f32 * 24.0, line, (230, 232, 235));
             }
             if let Some(label) = v.ask {
                 SDL_SetRenderDrawColor(self.ren, 46, 120, 220, 255);
@@ -277,6 +269,35 @@ impl Window {
     }
 }
 
+/// The bar's two lines, `fit` characters each: a long first line wraps at a space onto an empty
+/// second, and what still doesn't fit ends in "...".
+fn bar_lines(first: &str, second: &str, fit: usize) -> [String; 2] {
+    let cut = |s: &str| {
+        if s.chars().count() <= fit {
+            s.to_string()
+        } else {
+            s.chars().take(fit.saturating_sub(3)).collect::<String>() + "..."
+        }
+    };
+    if !second.is_empty() || first.chars().count() <= fit {
+        return [cut(first), cut(second)];
+    }
+    let mut head = String::new();
+    let mut words = first.split(' ').peekable();
+    while let Some(word) = words.peek() {
+        let wide = head.chars().count() + usize::from(!head.is_empty()) + word.chars().count();
+        if wide > fit && !head.is_empty() {
+            break;
+        }
+        if !head.is_empty() {
+            head.push(' ');
+        }
+        head.push_str(word);
+        words.next();
+    }
+    [cut(&head), cut(&words.collect::<Vec<_>>().join(" "))]
+}
+
 fn hits(r: &SDL_FRect, x: f32, y: f32) -> bool {
     r.w > 0.0 && x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h
 }
@@ -291,5 +312,28 @@ impl Drop for Window {
             SDL_DestroyRenderer(self.ren);
             SDL_DestroyWindow(self.win);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bar_lines;
+
+    #[test]
+    fn a_long_hint_wraps_onto_the_empty_second_line() {
+        let [a, b] = bar_lines(
+            "Scan these codes with your wallet and confirm on it",
+            "",
+            24,
+        );
+        assert_eq!(a, "Scan these codes with");
+        assert_eq!(b, "your wallet and confi...");
+    }
+
+    #[test]
+    fn a_second_line_keeps_its_place() {
+        let [a, b] = bar_lines("Hold your wallet's answer up", "Camera: FaceTime", 20);
+        assert_eq!(a, "Hold your wallet'...");
+        assert_eq!(b, "Camera: FaceTime");
     }
 }
