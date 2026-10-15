@@ -74,20 +74,28 @@ and the far denser code a large Linux console allowed only with great difficulty
 box, and so with smaller codes; `tools/qr-present` also takes `QR_PRESENT_HOLD` for how long each code stays
 drawn, in tenths of a second (2 by default).
 
-## The signing app
+## Apps that draw sessions
 
-In Basecamp the signer app (`evm_signer_ui`) shows what is signed, so it also draws the codes that carry
-it to a QR wallet and says how the answer is read: no helper window. It attaches as a presenter like a
-terminal; the core naming the caller `evm_signer_ui` is what makes it this kind, and only this kind gets:
+In Basecamp two apps draw sessions themselves, with no helper window. Each attaches as a presenter like a
+terminal, and the name the core gives the caller decides what it may draw:
+
+- The signer app (`evm_signer_ui`) shows what is signed. So it draws any session, including the codes
+  that carry a request to a QR wallet, and says how the answer is read.
+- The QR wallets app (`qr_signer_ui`) draws only the account scans `qr_signer_module` starts. Those show
+  no codes, only how the camera reads the wallet's. A session that shows codes, or one another module
+  starts, goes to the window instead.
+
+A lesser presenter can't take a fresh claim from a greater one: a terminal not an app's, the QR wallets
+app not the signer app's. Only these apps get:
 
 | Method | Parameters | Answer |
 |---|---|---|
 | `presenter_view` | `handle, frames_id` | `{ ok, active, state?, step?, in_window, title, hint?, label?, received?, expected?, seeing, frames_id, frames?, interval_ms }`, renewing the claim. `frames` (`[{ size, bits }]`, drawn in turn every `interval_ms`) come only when `frames_id` isn't the one given, so once a session. `label` is the button for the person's next step, which `presenter_press` takes. `in_window`: the session started before the app was drawing, and stays in the window |
 | `presenter_cancel` | `handle` | `{ ok, cancelled }`: the app's Cancel ends the session it draws, as the window's does |
 
-No picture leaves the helper for it: `seeing` says only whether a code is in the camera's view. While
-the app's claim is fresh, a terminal can't take it (`presenter_attach` answers an error), and its codes
-keep the size the caller gave them: an app's size doesn't shrink them as a terminal's does.
+No picture leaves the helper for them: `seeing` says only whether a code is in the camera's view. A claim
+that can't be taken makes `presenter_attach` answer an error. An app's codes keep the size the caller gave
+them: an app's size doesn't shrink them as a terminal's does.
 
 ## The helper
 

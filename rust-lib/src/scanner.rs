@@ -161,17 +161,50 @@ struct Session {
     seeing: bool,
 }
 
+/// Who draws sessions instead of the Logos QR window, and which.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Drawer {
+    /// A terminal: any session, its codes as text sized to it.
+    Terminal,
+    /// The signer app, which shows what is signed: any session, a request's codes included.
+    Signer,
+    /// An app that reads a wallet's code for this module: only its scans, which show no codes.
+    Scans(&'static str),
+}
+
+impl Drawer {
+    /// An app, which draws a session itself through `presenter_view`.
+    fn app(self) -> bool {
+        self != Drawer::Terminal
+    }
+
+    /// A drawer's claim can't be taken by a lesser one while it is fresh.
+    fn rank(self) -> u8 {
+        match self {
+            Drawer::Terminal => 0,
+            Drawer::Scans(_) => 1,
+            Drawer::Signer => 2,
+        }
+    }
+
+    fn draws(self, frames: &[Frame], caller: Option<&str>) -> bool {
+        match self {
+            Drawer::Terminal | Drawer::Signer => true,
+            Drawer::Scans(module) => frames.is_empty() && caller == Some(module),
+        }
+    }
+}
+
 struct Presenter {
     handle: String,
     seen: Instant,
     cols: usize,
     rows: usize,
-    /// The signing app, which draws the session itself; otherwise a terminal.
-    view: bool,
+    drawer: Drawer,
 }
 
-/// A session as the signing app draws it: no picture, only the codes to show and what the camera
-/// makes of the answer.
+/// A session as an app draws it: no picture, only the codes to show and what the camera makes of
+/// the answer.
 #[derive(Debug, Serialize)]
 pub struct View {
     /// A session is showing or reading codes, for this app to draw.
@@ -318,11 +351,13 @@ impl Scanner {
             inner.seq += 1;
             let id = format!("qrs_{}", inner.seq);
             let token = token();
-            let presenter = inner
+            let drawer = inner
                 .presenter
                 .as_ref()
-                .filter(|p| p.seen.elapsed() < PRESENTER_FRESH);
-            let (headless, view) = (presenter.is_some(), presenter.is_some_and(|p| p.view));
+                .filter(|p| p.seen.elapsed() < PRESENTER_FRESH)
+                .map(|p| p.drawer)
+                .filter(|d| d.draws(&frames, caller));
+            let (headless, view) = (drawer.is_some(), drawer.is_some_and(Drawer::app));
             let title = match (p.title, caller) {
                 (Some(t), Some(c)) => format!("{t} ({c})"),
                 (Some(t), None) => t,
@@ -475,15 +510,14 @@ impl Scanner {
         Ok(())
     }
 
-    /// Claim the drawing of sessions: `view` for the signing app, which draws them itself, else a
-    /// terminal. A terminal can't take the claim from the signing app while it is drawing.
-    pub fn presenter_attach(&self, view: bool) -> Result<String, ScanError> {
+    /// Claim the drawing of sessions. A lesser drawer can't take a fresh claim: a terminal not an
+    /// app's, an app reading wallets' codes not the signer app's.
+    pub fn presenter_attach(&self, drawer: Drawer) -> Result<String, ScanError> {
         let mut inner = self.lock();
-        if !view
-            && inner
-                .presenter
-                .as_ref()
-                .is_some_and(|p| p.view && p.seen.elapsed() < PRESENTER_FRESH)
+        if inner
+            .presenter
+            .as_ref()
+            .is_some_and(|p| p.drawer.rank() > drawer.rank() && p.seen.elapsed() < PRESENTER_FRESH)
         {
             return Err(ScanError::Busy);
         }
@@ -493,17 +527,17 @@ impl Scanner {
             seen: Instant::now(),
             cols: 80,
             rows: 24,
-            view,
+            drawer,
         });
         Ok(handle)
     }
 
-    /// The session as the signing app draws it, renewing its claim. `frames_id` names the codes the
+    /// The session as an app draws it, renewing its claim. `frames_id` names the codes the
     /// app already has, so they are sent once a session.
     pub fn presenter_view(&self, handle: &str, frames_id: &str) -> Result<View, ScanError> {
         let mut inner = self.lock();
         match inner.presenter.as_mut() {
-            Some(p) if p.handle == handle && p.view => p.seen = Instant::now(),
+            Some(p) if p.handle == handle && p.drawer.app() => p.seen = Instant::now(),
             _ => return Err(ScanError::NotAuthorized),
         }
         let Some(s) = inner
@@ -545,17 +579,17 @@ impl Scanner {
             expected: s.progress.map(|p| p.1),
             seeing: s.seeing,
             frames_id: s.id.clone(),
-            frames: (mine && s.id != frames_id).then(|| s.frames.clone()),
+            frames: (mine && s.id != frames_id && !s.frames.is_empty()).then(|| s.frames.clone()),
             interval_ms: s.interval.as_millis() as u64,
         })
     }
 
-    /// The signing app's Cancel: ends the session it draws. Whether one was running.
+    /// An app's Cancel: ends the session it draws. Whether one was running.
     pub fn presenter_cancel(&self, handle: &str) -> Result<bool, ScanError> {
         let (helper, id) = {
             let mut inner = self.lock();
             match inner.presenter.as_mut() {
-                Some(p) if p.handle == handle && p.view => p.seen = Instant::now(),
+                Some(p) if p.handle == handle && p.drawer.app() => p.seen = Instant::now(),
                 _ => return Err(ScanError::NotAuthorized),
             }
             match inner
@@ -659,7 +693,7 @@ impl Scanner {
         let p = inner
             .presenter
             .as_ref()
-            .filter(|p| p.seen.elapsed() < PRESENTER_FRESH && !p.view)?;
+            .filter(|p| p.seen.elapsed() < PRESENTER_FRESH && p.drawer == Drawer::Terminal)?;
         (1..=PRESENTER_MAX_VERSION)
             .rev()
             .find(|v| render::fits(frames::size_of(*v) + 4, p.cols, p.rows))
@@ -889,7 +923,7 @@ mod tests {
     #[test]
     fn a_presenter_takes_the_frames_and_the_helper_reads_without_a_window() {
         let (sc, fake, _) = scanner();
-        let h = sc.presenter_attach(false).unwrap();
+        let h = sc.presenter_attach(Drawer::Terminal).unwrap();
         assert!(sc
             .presenter_render(&h, 100, 50)
             .unwrap()
@@ -961,10 +995,10 @@ mod tests {
     #[test]
     fn the_signing_app_draws_the_session_itself() {
         let (sc, fake, heard) = scanner();
-        let h = sc.presenter_attach(true).unwrap();
+        let h = sc.presenter_attach(Drawer::Signer).unwrap();
         assert!(!sc.presenter_view(&h, "").unwrap().active);
         assert_eq!(
-            sc.presenter_attach(false),
+            sc.presenter_attach(Drawer::Terminal),
             Err(ScanError::Busy),
             "a terminal can't take the claim from it"
         );
@@ -1019,7 +1053,7 @@ mod tests {
             Some("a"),
         )
         .unwrap();
-        let h = sc.presenter_attach(true).unwrap();
+        let h = sc.presenter_attach(Drawer::Signer).unwrap();
         let v = sc.presenter_view(&h, "").unwrap();
         assert!(v.in_window && !v.active && v.frames.is_none() && v.label.is_none());
         assert_eq!(
@@ -1027,6 +1061,63 @@ mod tests {
             Ok(false),
             "not the app's to cancel"
         );
+    }
+
+    #[test]
+    fn the_wallets_app_draws_its_modules_scans_only() {
+        let wallets = Drawer::Scans("qr_signer_module");
+        let (sc, fake, _) = scanner();
+        let h = sc.presenter_attach(wallets).unwrap();
+        assert_eq!(
+            sc.presenter_attach(Drawer::Terminal),
+            Err(ScanError::Busy),
+            "a terminal can't take its claim"
+        );
+
+        // Its module's account scan: no window, drawn by the app.
+        let (id, token) = sc
+            .start(
+                params(r#"{"scan":true,"hint":"h"}"#),
+                Some("qr_signer_module"),
+            )
+            .unwrap();
+        assert!(fake.sinks.lock().unwrap()[0].0, "no window");
+        fake.emit(HelperEvent::Seeing { code: true });
+        let v = sc.presenter_view(&h, "").unwrap();
+        assert!(v.active && v.seeing && v.frames.is_none());
+        assert_eq!((v.step, v.hint.as_deref()), (Some(Step::Scan), Some("h")));
+        assert_eq!(sc.presenter_cancel(&h), Ok(true));
+        assert_eq!(sc.poll(&id, &token).unwrap().state, State::Cancelled);
+
+        // A request's codes are never its to draw: they go to the window.
+        sc.presenter_view(&h, "").unwrap();
+        sc.start(
+            params(r#"{"show":{"parts":["UR:BYTES/AA"]},"scan":true}"#),
+            Some("qr_signer_module"),
+        )
+        .unwrap();
+        assert!(!fake.sinks.lock().unwrap()[1].0, "in the window");
+        let v = sc.presenter_view(&h, "").unwrap();
+        assert!(!v.active && v.in_window && v.frames.is_none());
+
+        // The signer app takes the claim; the wallets app can't take it back while it draws.
+        let s = sc.presenter_attach(Drawer::Signer).unwrap();
+        assert_eq!(sc.presenter_attach(wallets), Err(ScanError::Busy));
+        assert_eq!(
+            sc.presenter_view(&h, "").unwrap_err(),
+            ScanError::NotAuthorized
+        );
+        sc.presenter_detach(&s).unwrap();
+    }
+
+    #[test]
+    fn another_modules_scan_is_not_the_wallets_apps() {
+        let (sc, fake, _) = scanner();
+        sc.presenter_attach(Drawer::Scans("qr_signer_module"))
+            .unwrap();
+        sc.start(params(r#"{"scan":true}"#), Some("some_wallet"))
+            .unwrap();
+        assert!(!fake.sinks.lock().unwrap()[0].0, "in the window");
     }
 
     #[test]

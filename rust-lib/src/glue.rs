@@ -10,7 +10,7 @@ use std::sync::{Arc, OnceLock};
 use serde_json::json;
 
 use crate::helper::{Helper, Launcher, ProcessLauncher, Sink};
-use crate::scanner::{Notify, ScanError, Scanner, StartParams};
+use crate::scanner::{Drawer, Notify, ScanError, Scanner, StartParams};
 
 pub trait QrScannerModule: Send + Sync + 'static {
     /// `{ ok, version, helper }`: the module's version and the helper it runs.
@@ -35,13 +35,13 @@ pub trait QrScannerModule: Send + Sync + 'static {
     fn presenter_press(&self, handle: String) -> String;
     fn presenter_detach(&self, handle: String) -> String;
 
-    // ── the signing app, which draws sessions itself ────────────────────
-    /// The session as the signing app draws it, renewing its claim: `{ ok, active, state?, step?,
+    // ── the apps that draw sessions themselves ──────────────────────────
+    /// The session as an app draws it, renewing its claim: `{ ok, active, state?, step?,
     /// in_window, title, hint?, label?, received?, expected?, seeing, frames_id, frames?,
     /// interval_ms }`. `frames` come only when `frames_id` isn't the one given. No picture leaves
-    /// the helper: `seeing` says only whether a code is in view. Only for the signing app's handle.
+    /// the helper: `seeing` says only whether a code is in view. Only for an app's handle.
     fn presenter_view(&self, handle: String, frames_id: String) -> String;
-    /// The signing app's Cancel: ends the session it draws. `{ ok, cancelled }`.
+    /// An app's Cancel: ends the session it draws. `{ ok, cancelled }`.
     fn presenter_cancel(&self, handle: String) -> String;
 
     fn on_context_ready(&self, _ctx: &RustModuleContext) {}
@@ -107,13 +107,17 @@ fn caller() -> Option<String> {
     }
 }
 
-/// The apps that draw sessions themselves: the signer app, which shows what is signed.
-const VIEW_APPS: &[&str] = &["evm_signer_ui"];
-
-/// Whether the core names the caller as one of them.
-fn view_app() -> bool {
-    matches!(logos_rust_sdk::current_caller(),
-        logos_rust_sdk::LogosCaller::Module { name, .. } if VIEW_APPS.contains(&name.as_str()))
+/// The apps that draw sessions themselves, by the name the core gives the caller: the signer app,
+/// which shows what is signed, any session; the QR wallets app the account scans its module starts.
+fn app_drawer() -> Option<Drawer> {
+    match logos_rust_sdk::current_caller() {
+        logos_rust_sdk::LogosCaller::Module { name, .. } => match name.as_str() {
+            "evm_signer_ui" => Some(Drawer::Signer),
+            "qr_signer_ui" => Some(Drawer::Scans("qr_signer_module")),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 impl QrScannerModule for QrScannerModuleImpl {
@@ -170,7 +174,10 @@ impl QrScannerModule for QrScannerModuleImpl {
     }
 
     fn presenter_attach(&self) -> String {
-        match self.scanner.presenter_attach(view_app()) {
+        match self
+            .scanner
+            .presenter_attach(app_drawer().unwrap_or(Drawer::Terminal))
+        {
             Ok(handle) => handle,
             Err(e) => format!("error: {}", e.message()),
         }
@@ -200,7 +207,7 @@ impl QrScannerModule for QrScannerModuleImpl {
     }
 
     fn presenter_view(&self, handle: String, frames_id: String) -> String {
-        if !view_app() {
+        if app_drawer().is_none() {
             return fail(ScanError::NotAuthorized);
         }
         match self.scanner.presenter_view(&handle, &frames_id) {
@@ -218,7 +225,7 @@ impl QrScannerModule for QrScannerModuleImpl {
     }
 
     fn presenter_cancel(&self, handle: String) -> String {
-        if !view_app() {
+        if app_drawer().is_none() {
             return fail(ScanError::NotAuthorized);
         }
         match self.scanner.presenter_cancel(&handle) {
