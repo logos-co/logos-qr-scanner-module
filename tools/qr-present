@@ -25,7 +25,8 @@ fi
 
 h=$("$ctl" --human call qr_scanner_module presenter_attach) || exit 1
 restore() {
-    "$ctl" call qr_scanner_module presenter_detach "str:$h" >/dev/null 2>&1
+    # In the background: with the daemon gone, the call would hold the terminal until it times out.
+    "$ctl" call qr_scanner_module presenter_detach "str:$h" >/dev/null 2>&1 &
     [ -n "$keys" ] && stty "$saved" </dev/tty 2>/dev/null
     printf '\033[0m\033[?25h\n'
 }
