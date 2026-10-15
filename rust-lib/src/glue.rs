@@ -35,6 +35,15 @@ pub trait QrScannerModule: Send + Sync + 'static {
     fn presenter_press(&self, handle: String) -> String;
     fn presenter_detach(&self, handle: String) -> String;
 
+    // ── the signing app, which draws sessions itself ────────────────────
+    /// The session as the signing app draws it, renewing its claim: `{ ok, active, state?, step?,
+    /// in_window, title, hint?, label?, received?, expected?, seeing, frames_id, frames?,
+    /// interval_ms }`. `frames` come only when `frames_id` isn't the one given. No picture leaves
+    /// the helper: `seeing` says only whether a code is in view. Only for the signing app's handle.
+    fn presenter_view(&self, handle: String, frames_id: String) -> String;
+    /// The signing app's Cancel: ends the session it draws. `{ ok, cancelled }`.
+    fn presenter_cancel(&self, handle: String) -> String;
+
     fn on_context_ready(&self, _ctx: &RustModuleContext) {}
 }
 
@@ -98,6 +107,15 @@ fn caller() -> Option<String> {
     }
 }
 
+/// The apps that draw sessions themselves: the signer app, which shows what is signed.
+const VIEW_APPS: &[&str] = &["evm_signer_ui"];
+
+/// Whether the core names the caller as one of them.
+fn view_app() -> bool {
+    matches!(logos_rust_sdk::current_caller(),
+        logos_rust_sdk::LogosCaller::Module { name, .. } if VIEW_APPS.contains(&name.as_str()))
+}
+
 impl QrScannerModule for QrScannerModuleImpl {
     fn scanner_info(&self) -> String {
         let helper = self.launcher.0.get().map(|l| l.path.display().to_string());
@@ -152,7 +170,10 @@ impl QrScannerModule for QrScannerModuleImpl {
     }
 
     fn presenter_attach(&self) -> String {
-        self.scanner.presenter_attach()
+        match self.scanner.presenter_attach(view_app()) {
+            Ok(handle) => handle,
+            Err(e) => format!("error: {}", e.message()),
+        }
     }
 
     fn presenter_render(&self, handle: String, cols: i64, rows: i64) -> String {
@@ -175,6 +196,34 @@ impl QrScannerModule for QrScannerModuleImpl {
         match self.scanner.presenter_detach(&handle) {
             Ok(()) => "detached".into(),
             Err(e) => format!("error: {}", e.message()),
+        }
+    }
+
+    fn presenter_view(&self, handle: String, frames_id: String) -> String {
+        if !view_app() {
+            return fail(ScanError::NotAuthorized);
+        }
+        match self.scanner.presenter_view(&handle, &frames_id) {
+            Ok(view) => {
+                let mut v = json!({ "ok": true });
+                if let (Some(out), Ok(serde_json::Value::Object(fields))) =
+                    (v.as_object_mut(), serde_json::to_value(view))
+                {
+                    out.extend(fields);
+                }
+                v.to_string()
+            }
+            Err(e) => fail(e),
+        }
+    }
+
+    fn presenter_cancel(&self, handle: String) -> String {
+        if !view_app() {
+            return fail(ScanError::NotAuthorized);
+        }
+        match self.scanner.presenter_cancel(&handle) {
+            Ok(cancelled) => json!({ "ok": true, "cancelled": cancelled }).to_string(),
+            Err(e) => fail(e),
         }
     }
 }

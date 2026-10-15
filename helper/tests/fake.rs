@@ -74,15 +74,19 @@ fn shows_frames_and_reads_codes() {
         writeln!(device, "raster {w} {h}").unwrap();
         device.write_all(&px).unwrap();
     }
-    let mut texts = Vec::new();
+    let (mut texts, mut seeing) = (Vec::new(), false);
     while texts.len() < 2 {
         let line = events.next().unwrap().unwrap();
         if line.contains(r#""ev":"text""#) {
             texts.push(line);
+        } else if line.contains(r#""ev":"seeing""#) {
+            // Whether a code is in view, never the picture.
+            seeing |= line == r#"{"ev":"seeing","code":true}"#;
         } else {
             assert!(line.contains(r#""ev":"camera""#), "{line}");
         }
     }
+    assert!(seeing, "a code in view is said");
     assert_eq!(texts[0], r#"{"ev":"text","text":"UR:BYTES/HDCXDWINVEZM"}"#);
     assert_eq!(
         texts[1],
@@ -94,7 +98,11 @@ fn shows_frames_and_reads_codes() {
         r#"{{"op":"show","frames":[{{"size":2,"bits":"10x1"}}]}}"#
     )
     .unwrap();
-    let bad = events.next().unwrap().unwrap();
+    let bad = events
+        .by_ref()
+        .map(|l| l.unwrap())
+        .find(|l| !l.contains(r#""ev":"seeing""#))
+        .unwrap();
     assert!(bad.contains(r#""code":"bad_command""#), "{bad}");
 
     writeln!(stdin, r#"{{"op":"close"}}"#).unwrap();

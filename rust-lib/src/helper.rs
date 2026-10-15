@@ -21,6 +21,10 @@ pub enum HelperEvent {
     Text {
         text: String,
     },
+    /// A code came into the camera's view, or left it.
+    Seeing {
+        code: bool,
+    },
     /// The person pressed the window's button.
     Pressed,
     Cancelled,

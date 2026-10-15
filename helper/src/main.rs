@@ -175,6 +175,8 @@ struct State {
     progress: Option<(u32, u32)>,
     preview: Option<Gray>,
     seen_at: Option<Instant>,
+    /// Whether a code was in view, as last told to the module.
+    told_seeing: bool,
     camera: Option<String>,
     problem: Option<String>,
     /// The button `ask` put up.
@@ -438,11 +440,15 @@ fn main() {
                 w.set_title(&format!("Logos QR - {}", st.title));
             }
         }
+        let seeing = st
+            .seen_at
+            .is_some_and(|t| t.elapsed() < Duration::from_millis(400));
+        if seeing != st.told_seeing {
+            st.told_seeing = seeing;
+            out.send(&Event::Seeing { code: seeing });
+        }
         if let Some(w) = win.as_mut() {
             let lines = st.lines(scanning.is_some());
-            let seeing = st
-                .seen_at
-                .is_some_and(|t| t.elapsed() < Duration::from_millis(400));
             w.draw(&View {
                 frame: st.frame(),
                 preview: st.preview.as_ref(),

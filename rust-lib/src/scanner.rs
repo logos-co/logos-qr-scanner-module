@@ -155,6 +155,10 @@ struct Session {
     progress: Option<(u32, u32)>,
     helper: Option<Box<dyn Helper>>,
     polled: Instant,
+    /// An app draws it (`presenter_view`), not a terminal.
+    view: bool,
+    /// A code is in the camera's view.
+    seeing: bool,
 }
 
 struct Presenter {
@@ -162,6 +166,39 @@ struct Presenter {
     seen: Instant,
     cols: usize,
     rows: usize,
+    /// The signing app, which draws the session itself; otherwise a terminal.
+    view: bool,
+}
+
+/// A session as the signing app draws it: no picture, only the codes to show and what the camera
+/// makes of the answer.
+#[derive(Debug, Serialize)]
+pub struct View {
+    /// A session is showing or reading codes, for this app to draw.
+    pub active: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<State>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step: Option<Step>,
+    /// It is in the Logos QR window instead: it started before this app was drawing.
+    pub in_window: bool,
+    pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+    /// The button's label, when the person has a step to take.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub received: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected: Option<u32>,
+    /// A code is in the camera's view.
+    pub seeing: bool,
+    /// Names the codes below; they are sent only when the app doesn't have them yet.
+    pub frames_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frames: Option<Vec<Frame>>,
+    pub interval_ms: u64,
 }
 
 #[derive(Default)]
@@ -281,10 +318,11 @@ impl Scanner {
             inner.seq += 1;
             let id = format!("qrs_{}", inner.seq);
             let token = token();
-            let headless = inner
+            let presenter = inner
                 .presenter
                 .as_ref()
-                .is_some_and(|p| p.seen.elapsed() < PRESENTER_FRESH);
+                .filter(|p| p.seen.elapsed() < PRESENTER_FRESH);
+            let (headless, view) = (presenter.is_some(), presenter.is_some_and(|p| p.view));
             let title = match (p.title, caller) {
                 (Some(t), Some(c)) => format!("{t} ({c})"),
                 (Some(t), None) => t,
@@ -312,6 +350,8 @@ impl Scanner {
                 progress: None,
                 helper: None,
                 polled: Instant::now(),
+                view,
+                seeing: false,
             });
             (id, token, headless)
         };
@@ -435,15 +475,106 @@ impl Scanner {
         Ok(())
     }
 
-    pub fn presenter_attach(&self) -> String {
-        let handle = format!("prs_{}.{}", self.lock().seq, token());
-        self.lock().presenter = Some(Presenter {
+    /// Claim the drawing of sessions: `view` for the signing app, which draws them itself, else a
+    /// terminal. A terminal can't take the claim from the signing app while it is drawing.
+    pub fn presenter_attach(&self, view: bool) -> Result<String, ScanError> {
+        let mut inner = self.lock();
+        if !view
+            && inner
+                .presenter
+                .as_ref()
+                .is_some_and(|p| p.view && p.seen.elapsed() < PRESENTER_FRESH)
+        {
+            return Err(ScanError::Busy);
+        }
+        let handle = format!("prs_{}.{}", inner.seq, token());
+        inner.presenter = Some(Presenter {
             handle: handle.clone(),
             seen: Instant::now(),
             cols: 80,
             rows: 24,
+            view,
         });
-        handle
+        Ok(handle)
+    }
+
+    /// The session as the signing app draws it, renewing its claim. `frames_id` names the codes the
+    /// app already has, so they are sent once a session.
+    pub fn presenter_view(&self, handle: &str, frames_id: &str) -> Result<View, ScanError> {
+        let mut inner = self.lock();
+        match inner.presenter.as_mut() {
+            Some(p) if p.handle == handle && p.view => p.seen = Instant::now(),
+            _ => return Err(ScanError::NotAuthorized),
+        }
+        let Some(s) = inner
+            .session
+            .as_ref()
+            .filter(|s| s.state.active() || s.view)
+        else {
+            return Ok(View {
+                active: false,
+                state: None,
+                step: None,
+                in_window: false,
+                title: String::new(),
+                hint: None,
+                label: None,
+                received: None,
+                expected: None,
+                seeing: false,
+                frames_id: String::new(),
+                frames: None,
+                interval_ms: 0,
+            });
+        };
+        let mine = s.view && s.state.active();
+        let (hint, label) = match (s.two_step(), s.step) {
+            (true, Step::Show) => (Some(SHOW_HINT.to_string()), Some(SCAN_LABEL)),
+            (true, Step::Scan) => (Some(SCAN_HINT.to_string()), Some(BACK_LABEL)),
+            (false, _) => (s.hint.clone(), None),
+        };
+        Ok(View {
+            active: mine,
+            state: Some(s.state),
+            step: Some(s.step),
+            in_window: s.state.active() && !s.headless,
+            title: s.title.clone(),
+            hint,
+            label: label.filter(|_| mine),
+            received: s.progress.map(|p| p.0),
+            expected: s.progress.map(|p| p.1),
+            seeing: s.seeing,
+            frames_id: s.id.clone(),
+            frames: (mine && s.id != frames_id).then(|| s.frames.clone()),
+            interval_ms: s.interval.as_millis() as u64,
+        })
+    }
+
+    /// The signing app's Cancel: ends the session it draws. Whether one was running.
+    pub fn presenter_cancel(&self, handle: &str) -> Result<bool, ScanError> {
+        let (helper, id) = {
+            let mut inner = self.lock();
+            match inner.presenter.as_mut() {
+                Some(p) if p.handle == handle && p.view => p.seen = Instant::now(),
+                _ => return Err(ScanError::NotAuthorized),
+            }
+            match inner
+                .session
+                .as_mut()
+                .filter(|s| s.view && s.state.active())
+            {
+                Some(s) => {
+                    s.state = State::Cancelled;
+                    (s.helper.take(), s.id.clone())
+                }
+                None => return Ok(false),
+            }
+        };
+        if let Some(mut h) = helper {
+            h.close();
+        }
+        self.notify.changed(&id, State::Cancelled.as_str());
+        Ok(true)
     }
 
     pub fn presenter_detach(&self, handle: &str) -> Result<(), ScanError> {
@@ -524,10 +655,11 @@ impl Scanner {
 
     fn presenter_max_version(&self) -> Option<u8> {
         let inner = self.lock();
+        // A terminal's size limits its codes; the signing app draws them as large as they come.
         let p = inner
             .presenter
             .as_ref()
-            .filter(|p| p.seen.elapsed() < PRESENTER_FRESH)?;
+            .filter(|p| p.seen.elapsed() < PRESENTER_FRESH && !p.view)?;
         (1..=PRESENTER_MAX_VERSION)
             .rev()
             .find(|v| render::fits(frames::size_of(*v) + 4, p.cols, p.rows))
@@ -553,6 +685,7 @@ fn on_event(inner: &Weak<Mutex<Inner>>, notify: &dyn Notify, id: &str, ev: Helpe
             }
             HelperEvent::Camera { name } => s.camera = Some(name),
             HelperEvent::Text { text } => s.texts.push(text),
+            HelperEvent::Seeing { code } => s.seeing = code,
             HelperEvent::Cancelled => {
                 if s.state.active() {
                     s.state = State::Cancelled;
@@ -756,11 +889,16 @@ mod tests {
     #[test]
     fn a_presenter_takes_the_frames_and_the_helper_reads_without_a_window() {
         let (sc, fake, _) = scanner();
-        let h = sc.presenter_attach();
+        let h = sc.presenter_attach(false).unwrap();
         assert!(sc
             .presenter_render(&h, 100, 50)
             .unwrap()
             .starts_with("Waiting"));
+        assert_eq!(
+            sc.presenter_view(&h, "").unwrap_err(),
+            ScanError::NotAuthorized,
+            "a terminal gets text, not the session"
+        );
         let (id, token) = sc
             .start(
                 params(r#"{"show":{"parts":["UR:BYTES/AA"]},"scan":true}"#),
@@ -818,6 +956,77 @@ mod tests {
         assert_eq!(sc.poll(&id, &token).unwrap().presenter_max_version, Some(3));
         sc.presenter_detach(&h).unwrap();
         assert!(sc.presenter_render(&h, 100, 50).is_err());
+    }
+
+    #[test]
+    fn the_signing_app_draws_the_session_itself() {
+        let (sc, fake, heard) = scanner();
+        let h = sc.presenter_attach(true).unwrap();
+        assert!(!sc.presenter_view(&h, "").unwrap().active);
+        assert_eq!(
+            sc.presenter_attach(false),
+            Err(ScanError::Busy),
+            "a terminal can't take the claim from it"
+        );
+        let (id, token) = sc
+            .start(
+                params(r#"{"show":{"parts":["UR:BYTES/AA"],"interval_ms":250},"scan":true}"#),
+                Some("qr_signer_module"),
+            )
+            .unwrap();
+        assert!(fake.sinks.lock().unwrap()[0].0, "no window");
+
+        let v = sc.presenter_view(&h, "").unwrap();
+        assert!(v.active && !v.in_window);
+        assert_eq!((v.step, v.label), (Some(Step::Show), Some(SCAN_LABEL)));
+        assert_eq!(v.frames.as_ref().map(Vec::len), Some(1));
+        assert_eq!(v.interval_ms, 250);
+        // The codes once a session: an app that has them gets the rest only.
+        assert!(sc
+            .presenter_view(&h, &v.frames_id)
+            .unwrap()
+            .frames
+            .is_none());
+        // Its own size doesn't shrink the codes, as a terminal's does.
+        assert_eq!(sc.poll(&id, &token).unwrap().presenter_max_version, None);
+
+        assert_eq!(sc.presenter_press(&h), Ok(true));
+        fake.emit(HelperEvent::Seeing { code: true });
+        sc.progress(&id, &token, 3, 10).unwrap();
+        let v = sc.presenter_view(&h, &v.frames_id).unwrap();
+        assert_eq!((v.step, v.label), (Some(Step::Scan), Some(BACK_LABEL)));
+        assert!(v.seeing);
+        assert_eq!((v.received, v.expected), (Some(3), Some(10)));
+
+        assert_eq!(sc.presenter_cancel(&h), Ok(true));
+        assert_eq!(sc.poll(&id, &token).unwrap().state, State::Cancelled);
+        assert_eq!(*fake.closed.lock().unwrap(), 1);
+        assert!(heard.0.lock().unwrap().contains(&(id, "cancelled".into())));
+        let v = sc.presenter_view(&h, "").unwrap();
+        assert_eq!((v.active, v.state), (false, Some(State::Cancelled)));
+        assert_eq!(sc.presenter_cancel(&h), Ok(false), "nothing left to cancel");
+        assert_eq!(
+            sc.presenter_cancel("prs_0.nope"),
+            Err(ScanError::NotAuthorized)
+        );
+    }
+
+    #[test]
+    fn a_session_the_window_shows_is_left_to_it() {
+        let (sc, _, _) = scanner();
+        sc.start(
+            params(r#"{"show":{"parts":["UR:BYTES/AA"]},"scan":true}"#),
+            Some("a"),
+        )
+        .unwrap();
+        let h = sc.presenter_attach(true).unwrap();
+        let v = sc.presenter_view(&h, "").unwrap();
+        assert!(v.in_window && !v.active && v.frames.is_none() && v.label.is_none());
+        assert_eq!(
+            sc.presenter_cancel(&h),
+            Ok(false),
+            "not the app's to cancel"
+        );
     }
 
     #[test]

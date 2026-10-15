@@ -1,5 +1,6 @@
 //! The helper's protocol: one JSON object per line. Commands arrive on standard input, events leave
-//! on standard output. Only frames go in and only decoded text comes out: no picture ever leaves.
+//! on standard output. Only frames go in, and only decoded text and whether a code is in view come
+//! out: no picture ever leaves.
 
 use std::io::Write;
 use std::sync::Mutex;
@@ -87,6 +88,10 @@ pub enum Event {
     },
     Text {
         text: String,
+    },
+    /// A code came into the camera's view, or left it: for an app drawing the session to say so.
+    Seeing {
+        code: bool,
     },
     /// The person pressed the button `ask` put up.
     Pressed,
