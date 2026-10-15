@@ -3,11 +3,20 @@
 # logosctl. While this runs, the module's helper reads the camera without a window. Ctrl-C to stop.
 #   tools/qr-present [logosctl]
 ctl=${1:-logosctl}
+
+# "rows cols". stty asks the terminal itself: tput inside $(...) can't see it, and says 80x24.
+size() {
+    s=$(stty size </dev/tty 2>/dev/null)
+    case "$s" in
+        "" | "0 "* | *" 0") echo "${LINES:-24} ${COLUMNS:-80}" ;;
+        *) echo "$s" ;;
+    esac
+}
+
 h=$("$ctl" --human call qr_scanner_module presenter_attach) || exit 1
-trap '"$ctl" call qr_scanner_module presenter_detach "str:$h" >/dev/null 2>&1; printf "\033[0m\033[?25h\n"; exit 0' INT TERM
+trap '"$ctl" call qr_scanner_module presenter_detach "str:$h" >/dev/null 2>&1; printf "\033[0m\033[?25h\n"; exit 0' INT TERM HUP
 printf '\033[2J\033[?25l'
-while out=$("$ctl" --human call qr_scanner_module presenter_render "str:$h" \
-    "${COLUMNS:-$(tput cols 2>/dev/null || echo 80)}" "${LINES:-$(tput lines 2>/dev/null || echo 24)}"); do
+while set -- $(size) && out=$("$ctl" --human call qr_scanner_module presenter_render "str:$h" "$2" "$1"); do
     printf '\033[H%s\033[J' "$out"
     sleep 0.2
 done

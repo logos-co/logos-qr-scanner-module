@@ -53,7 +53,7 @@ module draws them; `tools/qr-present` and `tools/qr-present.ps1` only print what
 | Method | Parameters | Answer |
 |---|---|---|
 | `presenter_attach` | | A handle, as plain text |
-| `presenter_render` | `handle, cols, rows` | The frame due now, as plain text: half blocks, two modules a character, black on white through ANSI codes, with a status line. Each call renews the presenter's claim |
+| `presenter_render` | `handle, cols, rows` | The frame due now, as plain text: each module two spaces painted black or white (256-colour background codes) on one row, so about square and drawn by no font; then a status line. Each call renews the presenter's claim |
 | `presenter_detach` | `handle` | `detached` |
 
 While a presenter rendered in the last 10 seconds, new sessions start the helper with `--no-window`: the

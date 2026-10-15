@@ -648,11 +648,12 @@ mod tests {
             .iter()
             .any(|l| l.contains(r#""op":"show""#)));
         let text = sc.presenter_render(&h, 100, 50).unwrap();
-        assert!(text.contains('█'), "{text}");
+        assert!(text.contains("\x1b[48;5;16m"), "{text}");
         assert!(sc.presenter_render("prs_0.nope", 100, 50).is_err());
         let p = sc.poll(&id, &token).unwrap();
         assert!(p.presenter);
-        assert_eq!(p.presenter_max_version, Some(19));
+        // Two columns and one row a module: 100 by 50 holds 48 modules, a version 6 code and its margin.
+        assert_eq!(p.presenter_max_version, Some(6));
         sc.presenter_detach(&h).unwrap();
         assert!(sc.presenter_render(&h, 100, 50).is_err());
     }

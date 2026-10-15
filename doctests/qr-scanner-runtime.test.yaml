@@ -136,10 +136,10 @@ sections:
         code_block: "tools/qr-present          # Ctrl-C to stop"
         expect_contains:
           - "presented"
-      - title: "It drew the code in half blocks"
-        run: "grep -q '▀' present.out && echo 'half blocks'"
+      - title: "It painted the code, two black or white spaces a module"
+        run: "grep -q '48;5;16m' present.out && echo 'painted'"
         expect_contains:
-          - "half blocks"
+          - "painted"
 
   - title: "Stop"
     step: true
