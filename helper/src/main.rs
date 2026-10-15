@@ -7,7 +7,7 @@
 
 mod camera;
 mod decode;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 mod exposure;
 mod platform;
 mod protocol;

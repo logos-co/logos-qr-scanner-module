@@ -69,7 +69,7 @@ pub struct SdlCamera {
     ids: Vec<SDL_CameraID>,
     at: usize,
     name: String,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     exposure: Option<crate::exposure::Exposure>,
 }
 
@@ -190,7 +190,7 @@ impl SdlCamera {
             ids,
             at,
             name: String::new(),
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", windows))]
             exposure: None,
         };
         cam.open_at()?;
@@ -211,7 +211,7 @@ impl SdlCamera {
         }
         self.cam = cam;
         self.name = camera_name(id);
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", windows))]
         {
             self.exposure = crate::exposure::Exposure::for_camera(&self.name);
         }
@@ -220,7 +220,7 @@ impl SdlCamera {
 
     fn close(&mut self) {
         // Its own auto exposure back, before the camera goes.
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", windows))]
         {
             self.exposure = None;
         }
@@ -319,7 +319,7 @@ impl Source for SdlCamera {
         self.open_at()
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     fn tune(&mut self, img: &Gray, found: &Found) {
         if let Some(e) = self.exposure.as_mut() {
             e.tune(img, found);

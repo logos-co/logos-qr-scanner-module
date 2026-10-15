@@ -70,8 +70,9 @@ code version the terminal holds, so a caller can make its parts smaller. That is
 however large the terminal: a Keycard Shell read version 4 from a terminal well, version 6 with some trouble,
 and the far denser code a large Linux console allowed only with great difficulty.
 
-`tools/qr-present` takes `QR_PRESENT_SIZE="rows cols"` to draw within a smaller box, and so with smaller
-codes, and `QR_PRESENT_HOLD` for how long each code stays drawn, in tenths of a second (2 by default).
+`tools/qr-present` and `tools/qr-present.ps1` take `QR_PRESENT_SIZE="rows cols"` to draw within a smaller
+box, and so with smaller codes; `tools/qr-present` also takes `QR_PRESENT_HOLD` for how long each code stays
+drawn, in tenths of a second (2 by default).
 
 ## The helper
 
@@ -102,13 +103,18 @@ when its standard input does, so it never outlives its module.
   by the helper itself (zune-jpeg, luma only); a raw format wins a tie. On macOS the helper asks for access
   itself first, since SDL relies on an implicit prompt. `LOGOS_QR_CAMERA` picks a camera by name; Tab
   switches cameras in the window.
-- **Exposure, on Linux.** A webcam's auto exposure meters the whole room and turns a wallet's backlit screen
-  white. While it scans, the helper sets the exposure itself through V4L2, in whole multiples of 5 ms (5 to
-  30 ms), since the Keycard Shell dims its backlight with 200 Hz PWM and other exposures band its codes. It
-  searches on the middle of the picture, then meters inside the code it read and holds while parts arrive.
-  The camera's own settings are written to `$XDG_RUNTIME_DIR/logos-qr-exposure-videoN` before anything
-  changes, given back when the camera closes, and given back by the next helper if one died.
-  `LOGOS_QR_EXPOSURE=50` pins 5 ms, for trying exposures by hand.
+- **Exposure, on Linux and Windows.** A webcam's auto exposure meters the whole room and turns a wallet's
+  backlit screen white. While it scans, the helper sets the exposure itself. It searches on the middle of
+  the picture, then meters inside the code it read and holds while parts arrive.
+  - On Linux, through V4L2, in whole multiples of 5 ms (5 to 30 ms), since the Keycard Shell dims its
+    backlight with 200 Hz PWM and other exposures band its codes.
+  - On Windows, through DirectShow's `IAMCameraControl`, which holds while SDL streams the camera through
+    Media Foundation. It offers powers of two only: 7.8, 15.6 and 31 ms, from 15.6 ms.
+  - The camera's own settings are written to `logos-qr-exposure-<camera>` in `$XDG_RUNTIME_DIR` (else the
+    temporary directory) before anything changes. They are given back when the camera closes, or by the
+    next helper if one died.
+  - `LOGOS_QR_EXPOSURE` pins one exposure for trying them by hand, in the camera's units: on Linux `50` is
+    5 ms, on Windows `-6` is 2^-6 s.
 - **Decoding.** zxing-cpp over the whole frame, then rqrr over its centre when zxing found nothing.
 - **Stopping.** SIGTERM, SIGINT and SIGHUP stop the helper as `close` does, so the camera is given back.
 - **Diagnosing a camera.** `LOGOS_QR_DUMP=frame.pgm` rewrites the picture the decoders see each second and

@@ -65,8 +65,8 @@ pub struct Found {
     pub any: bool,
     /// Texts not reported before.
     pub new: Vec<String>,
-    /// Where the first code read is, for metering the exposure on it (on Linux).
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    /// Where the first code read is, for metering the exposure on it (on Linux and Windows).
+    #[cfg_attr(not(any(target_os = "linux", windows)), allow(dead_code))]
     pub region: Option<Region>,
 }
 
