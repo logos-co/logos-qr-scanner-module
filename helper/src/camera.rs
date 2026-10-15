@@ -11,8 +11,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use sdl3_sys::everything::*;
+use zune_jpeg::zune_core::colorspace::ColorSpace;
+use zune_jpeg::zune_core::options::DecoderOptions;
+use zune_jpeg::JpegDecoder;
 
-use crate::decode::Gray;
+use crate::decode::{Found, Gray};
 use crate::protocol::Frame;
 
 pub trait Source: Send {
@@ -23,6 +26,8 @@ pub trait Source: Send {
     fn switch(&mut self) -> Result<(), CameraError> {
         Ok(())
     }
+    /// What the decoders made of a picture, for a camera that sets its exposure for the code.
+    fn tune(&mut self, _img: &Gray, _found: &Found) {}
 }
 
 #[derive(Debug)]
@@ -64,6 +69,8 @@ pub struct SdlCamera {
     ids: Vec<SDL_CameraID>,
     at: usize,
     name: String,
+    #[cfg(target_os = "linux")]
+    exposure: Option<crate::exposure::Exposure>,
 }
 
 // SAFETY: SDL's camera functions are documented as safe to call from any thread, and the camera is
@@ -97,7 +104,9 @@ fn camera_name(id: SDL_CameraID) -> String {
 }
 
 /// The widest format up to 1920 pixels: a Shell's codes are small, so resolution matters more than
-/// rate. Asked for in NV12, whose first plane is the grayscale picture; SDL converts if it must.
+/// rate. Raw formats are asked for in NV12, whose first plane is the grayscale picture, and SDL
+/// converts. MJPEG, which SDL can't convert but USB webcams often keep their widest modes for,
+/// comes as it is and is decoded here; a raw mode wins a tie.
 fn best_spec(id: SDL_CameraID) -> Option<SDL_CameraSpec> {
     let mut n = 0;
     // SAFETY: as in `camera_ids`; the specs are copied before the array is freed.
@@ -115,15 +124,51 @@ fn best_spec(id: SDL_CameraID) -> Option<SDL_CameraSpec> {
         let fps = |s: &SDL_CameraSpec| {
             s.framerate_numerator as f32 / s.framerate_denominator.max(1) as f32
         };
-        specs
-            .into_iter()
-            .filter(|s| s.width <= 1920 && fps(s) >= 10.0)
-            .max_by_key(|s| (s.width, s.height, fps(s) as i32))
-            .map(|mut s| {
-                s.format = SDL_PIXELFORMAT_NV12;
-                s
-            })
+        if std::env::var_os("LOGOS_QR_DUMP").is_some() {
+            for s in &specs {
+                eprintln!(
+                    "logos-qr-helper: camera offers {}x{} {} at {:.0} fps",
+                    s.width,
+                    s.height,
+                    CStr::from_ptr(SDL_GetPixelFormatName(s.format)).to_string_lossy(),
+                    fps(s)
+                );
+            }
+        }
+        let raw = |s: &SDL_CameraSpec| s.format != SDL_PIXELFORMAT_MJPG;
+        // A slow mode beats none: a few frames a second still read a code.
+        let pick = |min: f32| {
+            specs
+                .iter()
+                .filter(|s| s.width <= 1920 && fps(s) >= min)
+                .max_by_key(|s| (s.width, s.height, raw(s), fps(s) as i32))
+                .copied()
+        };
+        let spec = pick(10.0).or_else(|| pick(0.0))?;
+        eprintln!(
+            "logos-qr-helper: camera mode {}x{} {} at {:.0} fps",
+            spec.width,
+            spec.height,
+            CStr::from_ptr(SDL_GetPixelFormatName(spec.format)).to_string_lossy(),
+            fps(&spec)
+        );
+        if !raw(&spec) {
+            return Some(spec);
+        }
+        Some(SDL_CameraSpec {
+            format: SDL_PIXELFORMAT_NV12,
+            ..spec
+        })
     }
+}
+
+/// An MJPEG frame's grayscale picture: its luma alone, decoded without the colour.
+fn mjpeg_luma(jpeg: &[u8]) -> Option<Gray> {
+    let opts = DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::Luma);
+    let mut d = JpegDecoder::new_with_options(jpeg, opts);
+    let px = d.decode().ok()?;
+    let (w, h) = d.dimensions()?;
+    (px.len() == w * h).then_some(Gray { w, h, px })
 }
 
 impl SdlCamera {
@@ -145,6 +190,8 @@ impl SdlCamera {
             ids,
             at,
             name: String::new(),
+            #[cfg(target_os = "linux")]
+            exposure: None,
         };
         cam.open_at()?;
         Ok(cam)
@@ -164,10 +211,19 @@ impl SdlCamera {
         }
         self.cam = cam;
         self.name = camera_name(id);
+        #[cfg(target_os = "linux")]
+        {
+            self.exposure = crate::exposure::Exposure::for_camera(&self.name);
+        }
         Ok(())
     }
 
     fn close(&mut self) {
+        // Its own auto exposure back, before the camera goes.
+        #[cfg(target_os = "linux")]
+        {
+            self.exposure = None;
+        }
         if !self.cam.is_null() {
             // SAFETY: the camera was opened by this value and is closed once.
             unsafe { SDL_CloseCamera(self.cam) };
@@ -182,8 +238,8 @@ impl Drop for SdlCamera {
     }
 }
 
-/// The grayscale picture of a camera frame: NV12's first plane as it is, anything else through
-/// SDL's conversion to RGBA.
+/// The grayscale picture of a camera frame: NV12's first plane as it is, MJPEG decoded here,
+/// anything else through SDL's conversion to RGBA.
 ///
 /// # Safety
 /// `f` must be a valid surface SDL handed out and not yet released.
@@ -192,6 +248,13 @@ unsafe fn luma(f: *mut SDL_Surface) -> Option<Gray> {
     let (w, h) = (s.w.max(0) as usize, s.h.max(0) as usize);
     if w == 0 || h == 0 || s.pixels.is_null() {
         return None;
+    }
+    if s.format == SDL_PIXELFORMAT_MJPG {
+        // SDL hands a compressed frame over as it came, its length in `pitch`.
+        return mjpeg_luma(std::slice::from_raw_parts(
+            s.pixels as *const u8,
+            s.pitch.max(0) as usize,
+        ));
     }
     let mut px = Vec::with_capacity(w * h);
     if s.format == SDL_PIXELFORMAT_NV12 {
@@ -254,6 +317,13 @@ impl Source for SdlCamera {
         self.close();
         self.at = (self.at + 1) % self.ids.len();
         self.open_at()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn tune(&mut self, img: &Gray, found: &Found) {
+        if let Some(e) = self.exposure.as_mut() {
+            e.tune(img, found);
+        }
     }
 }
 
@@ -354,5 +424,41 @@ impl Source for FakeCamera {
                 Err(CameraError::Failed("the fake device went away".into()))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mjpeg_luma;
+    use crate::decode::Decoder;
+    use qrcodegen::{QrCode, QrCodeEcc};
+
+    /// A code as an MJPEG webcam sends it, a JPEG, reads once decoded.
+    #[test]
+    fn an_mjpeg_frame_reads() {
+        let text = "UR:CRYPTO-PSBT/1-9/LPADASCFADAXCYBDINHGDHHDLTAEAEAEAEAEAE";
+        let qr = QrCode::encode_text(text, QrCodeEcc::Low).unwrap();
+        let (n, scale) = (qr.size() as usize, 6);
+        let side = (n + 8) * scale;
+        let px: Vec<u8> = (0..side * side)
+            .map(|i| {
+                let (x, y) = ((i % side) / scale, (i / side) / scale);
+                let dark = (4..n + 4).contains(&x)
+                    && (4..n + 4).contains(&y)
+                    && qr.get_module(x as i32 - 4, y as i32 - 4);
+                if dark {
+                    30
+                } else {
+                    225
+                }
+            })
+            .collect();
+        let mut jpeg = Vec::new();
+        jpeg_encoder::Encoder::new(&mut jpeg, 85)
+            .encode(&px, side as u16, side as u16, jpeg_encoder::ColorType::Luma)
+            .unwrap();
+        let img = mjpeg_luma(&jpeg).expect("the JPEG decodes");
+        assert_eq!((img.w, img.h), (side, side));
+        assert_eq!(Decoder::new().decode(&img).new, vec![text.to_string()]);
     }
 }

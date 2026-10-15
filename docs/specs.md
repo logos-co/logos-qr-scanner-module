@@ -66,7 +66,12 @@ module draws them; `tools/qr-present` and `tools/qr-present.ps1` only print what
 
 While a presenter rendered in the last 10 seconds, new sessions start the helper with `--no-window`: the
 camera still reads, and the codes go to the terminal. `poll` then answers `presenter: true` and the largest
-code version the terminal holds, so a caller can make its parts smaller.
+code version the terminal holds, so a caller can make its parts smaller. That is never above version 5,
+however large the terminal: a Keycard Shell read version 4 from a terminal well, version 6 with some trouble,
+and the far denser code a large Linux console allowed only with great difficulty.
+
+`tools/qr-present` takes `QR_PRESENT_SIZE="rows cols"` to draw within a smaller box, and so with smaller
+codes, and `QR_PRESENT_HOLD` for how long each code stays drawn, in tenths of a second (2 by default).
 
 ## The helper
 
@@ -92,10 +97,23 @@ when its standard input does, so it never outlives its module.
 | `cancelled` | |
 | `error` | `code, message` |
 
-- **Camera.** SDL3's camera API, at the widest format up to 1920 pixels, in NV12 for its grayscale plane.
-  On macOS the helper asks for access itself first, since SDL relies on an implicit prompt. `LOGOS_QR_CAMERA`
-  picks a camera by name; Tab switches cameras in the window.
+- **Camera.** SDL3's camera API, at the widest format up to 1920 pixels. Raw formats come as NV12, for its
+  grayscale plane. MJPEG, which SDL can't convert but USB webcams often keep their HD modes for, is decoded
+  by the helper itself (zune-jpeg, luma only); a raw format wins a tie. On macOS the helper asks for access
+  itself first, since SDL relies on an implicit prompt. `LOGOS_QR_CAMERA` picks a camera by name; Tab
+  switches cameras in the window.
+- **Exposure, on Linux.** A webcam's auto exposure meters the whole room and turns a wallet's backlit screen
+  white. While it scans, the helper sets the exposure itself through V4L2, in whole multiples of 5 ms (5 to
+  30 ms), since the Keycard Shell dims its backlight with 200 Hz PWM and other exposures band its codes. It
+  searches on the middle of the picture, then meters inside the code it read and holds while parts arrive.
+  The camera's own settings are written to `$XDG_RUNTIME_DIR/logos-qr-exposure-videoN` before anything
+  changes, given back when the camera closes, and given back by the next helper if one died.
+  `LOGOS_QR_EXPOSURE=50` pins 5 ms, for trying exposures by hand.
 - **Decoding.** zxing-cpp over the whole frame, then rqrr over its centre when zxing found nothing.
+- **Stopping.** SIGTERM, SIGINT and SIGHUP stop the helper as `close` does, so the camera is given back.
+- **Diagnosing a camera.** `LOGOS_QR_DUMP=frame.pgm` rewrites the picture the decoders see each second and
+  lists the camera's modes on standard error; `logos-qr-helper --decode frame.pgm` runs the decoders over
+  such a picture.
 - **Window.** SDL3's renderer: the frames, the camera's picture framed green while a code is in view, the
   status, and Cancel (or Escape).
 - **Fake mode.** `LOGOS_QR_HELPER_FAKE=host:port` replaces the camera and the window with a TCP peer: it is

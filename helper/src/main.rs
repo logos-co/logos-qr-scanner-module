@@ -7,6 +7,8 @@
 
 mod camera;
 mod decode;
+#[cfg(target_os = "linux")]
+mod exposure;
 mod platform;
 mod protocol;
 mod window;
@@ -26,6 +28,24 @@ use protocol::{Command, Event, Frame, Out};
 use window::{View, Window};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Set by SIGTERM, SIGINT or SIGHUP: the helper stops the way `close` does, so the camera is given
+/// back as it was found.
+static STOP: AtomicBool = AtomicBool::new(false);
+
+#[cfg(unix)]
+fn stop_on_signals() {
+    extern "C" fn stop(_: libc::c_int) {
+        STOP.store(true, Ordering::Relaxed);
+    }
+    for sig in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
+        // SAFETY: the handler only stores to an atomic, which is async-signal-safe.
+        unsafe { libc::signal(sig, stop as *const () as libc::sighandler_t) };
+    }
+}
+
+#[cfg(not(unix))]
+fn stop_on_signals() {}
 
 enum Msg {
     Cmd(Command),
@@ -71,6 +91,9 @@ fn scan(out: Arc<Out>, tx: Sender<Msg>, fake: Option<FakeCamera>, preview: bool)
         let _ = tx.send(Msg::Camera(src.name()));
         let mut decoder = Decoder::new();
         let mut last_preview = Instant::now() - Duration::from_secs(1);
+        // For diagnosing a camera: the picture the decoders see, as a PGM, rewritten each second.
+        let dump = std::env::var_os("LOGOS_QR_DUMP");
+        let (mut last_dump, mut frames) = (Instant::now(), 0u32);
         while !s.load(Ordering::Relaxed) {
             if sw.swap(false, Ordering::Relaxed) {
                 if let Err(e) = src.switch() {
@@ -82,7 +105,17 @@ fn scan(out: Arc<Out>, tx: Sender<Msg>, fake: Option<FakeCamera>, preview: bool)
             }
             match src.next() {
                 Ok(Some(img)) => {
+                    frames += 1;
+                    if let Some(path) = dump.as_ref().filter(|_| last_dump.elapsed().as_secs() >= 1)
+                    {
+                        let mut pgm = format!("P5\n{} {}\n255\n", img.w, img.h).into_bytes();
+                        pgm.extend_from_slice(&img.px);
+                        let _ = std::fs::write(path, pgm);
+                        eprintln!("logos-qr-helper: {frames} frames, {}x{}", img.w, img.h);
+                        last_dump = Instant::now();
+                    }
                     let found = decoder.decode(&img);
+                    src.tune(&img, &found);
                     for text in found.new {
                         out.send(&Event::Text { text });
                     }
@@ -189,6 +222,17 @@ fn main() {
         println!("logos-qr-helper {VERSION}");
         return;
     }
+    // For diagnosing a camera: the decoders over a picture LOGOS_QR_DUMP saved.
+    if let Some(i) = args.iter().position(|a| a == "--decode") {
+        let Some(img) = args.get(i + 1).and_then(|p| decode::read_pgm(p)) else {
+            eprintln!("logos-qr-helper: --decode takes a grayscale PGM (P5)");
+            std::process::exit(2);
+        };
+        for text in Decoder::new().decode(&img).new {
+            println!("{text}");
+        }
+        return;
+    }
     platform::disclaim();
     let probe = args.iter().any(|a| a == "--probe");
     let out = Arc::new(Out::new());
@@ -214,6 +258,10 @@ fn main() {
     } else {
         SDL_INIT_CAMERA
     };
+    // SAFETY: a hint set before SDL_Init, with NUL-terminated strings. Without it SDL turns SIGTERM
+    // into a quit event, which a helper with no window never reads, so it could not be stopped.
+    unsafe { SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, c"1".as_ptr()) };
+    stop_on_signals();
     // SAFETY: SDL is initialised once, on the main thread, before any other SDL call.
     let video = unsafe {
         want_window && SDL_Init(camera_flag | SDL_INIT_VIDEO) || {
@@ -254,6 +302,9 @@ fn main() {
     }
 
     'main: loop {
+        if STOP.load(Ordering::Relaxed) {
+            break 'main;
+        }
         if let Some(w) = win.as_mut() {
             // SAFETY: an all-zero event is valid; SDL fills it, and only the variant its type names is read.
             unsafe {

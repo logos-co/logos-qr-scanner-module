@@ -37,6 +37,8 @@ sdl3-sys = { version = "0.7.2", default-features = false, features = [
 zxing-cpp = { version = "0.5.3", features = ["bundled"] }
 rqrr = { version = "0.11", default-features = false }
 qrcodegen = { version = "1.8", optional = true }
+# MJPEG frames, which SDL can't convert and webcams often keep their HD modes for.
+zune-jpeg = "0.4"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -47,6 +49,7 @@ objc2-av-foundation = { version = "0.3", default-features = false, features = ["
 block2 = "0.6"
 
 [dev-dependencies]
+jpeg-encoder = "0.7.1"
 qrcodegen = "1.8"
 
 [profile.release]

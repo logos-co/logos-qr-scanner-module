@@ -35,6 +35,26 @@ impl Gray {
     }
 }
 
+/// A grayscale PGM (P5, 8 bits) as LOGOS_QR_DUMP writes it.
+pub fn read_pgm(path: &str) -> Option<Gray> {
+    let data = std::fs::read(path).ok()?;
+    let mut fields = Vec::new();
+    let mut at = 0;
+    while fields.len() < 4 {
+        while data.get(at)?.is_ascii_whitespace() {
+            at += 1;
+        }
+        let start = at;
+        while !data.get(at)?.is_ascii_whitespace() {
+            at += 1;
+        }
+        fields.push(std::str::from_utf8(&data[start..at]).ok()?.to_string());
+    }
+    let (w, h): (usize, usize) = (fields[1].parse().ok()?, fields[2].parse().ok()?);
+    let px = data.get(at + 1..at + 1 + w * h)?.to_vec();
+    (fields[0] == "P5" && fields[3] == "255").then_some(Gray { w, h, px })
+}
+
 pub struct Decoder {
     reader: BarcodeReader,
     seen: HashSet<String>,
@@ -45,6 +65,33 @@ pub struct Found {
     pub any: bool,
     /// Texts not reported before.
     pub new: Vec<String>,
+    /// Where the first code read is, for metering the exposure on it (on Linux).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub region: Option<Region>,
+}
+
+/// A box in the picture, in pixels: `x0..x1`, `y0..y1`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Region {
+    pub x0: usize,
+    pub y0: usize,
+    pub x1: usize,
+    pub y1: usize,
+}
+
+impl Region {
+    /// The box around four corners, inside a `w` by `h` picture; None when empty.
+    fn around(corners: [(i32, i32); 4], w: usize, h: usize) -> Option<Region> {
+        let xs = corners.map(|c| c.0.clamp(0, w as i32) as usize);
+        let ys = corners.map(|c| c.1.clamp(0, h as i32) as usize);
+        let r = Region {
+            x0: *xs.iter().min()?,
+            y0: *ys.iter().min()?,
+            x1: *xs.iter().max()?,
+            y1: *ys.iter().max()?,
+        };
+        (r.x1 > r.x0 && r.y1 > r.y0).then_some(r)
+    }
 }
 
 impl Decoder {
@@ -62,19 +109,21 @@ impl Decoder {
     }
 
     pub fn decode(&mut self, img: &Gray) -> Found {
-        let mut texts = self.zxing(img);
-        if texts.is_empty() {
-            texts = centre(img);
+        let mut codes = self.zxing(img);
+        if codes.is_empty() {
+            codes = centre(img);
         }
-        let any = !texts.is_empty();
-        let new = texts
+        let region = codes.first().and_then(|(_, r)| *r);
+        let any = !codes.is_empty();
+        let new = codes
             .into_iter()
+            .map(|(t, _)| t)
             .filter(|t| self.seen.insert(t.clone()))
             .collect();
-        Found { any, new }
+        Found { any, new, region }
     }
 
-    fn zxing(&self, img: &Gray) -> Vec<String> {
+    fn zxing(&self, img: &Gray) -> Vec<(String, Option<Region>)> {
         let Ok(view) = ImageView::from_slice(&img.px, img.w as i32, img.h as i32, ImageFormat::Lum)
         else {
             return Vec::new();
@@ -82,8 +131,13 @@ impl Decoder {
         match self.reader.from(view) {
             Ok(codes) => codes
                 .into_iter()
-                .map(|c| c.text())
-                .filter(|t| !t.is_empty())
+                .map(|c| {
+                    let p = c.position();
+                    let corners = [p.top_left, p.top_right, p.bottom_right, p.bottom_left]
+                        .map(|q| (q.x, q.y));
+                    (c.text(), Region::around(corners, img.w, img.h))
+                })
+                .filter(|(t, _)| !t.is_empty())
                 .collect(),
             Err(_) => Vec::new(),
         }
@@ -91,7 +145,7 @@ impl Decoder {
 }
 
 /// rqrr over the middle half of the picture, where a code held up to the camera usually is.
-fn centre(img: &Gray) -> Vec<String> {
+fn centre(img: &Gray) -> Vec<(String, Option<Region>)> {
     let (cw, ch) = (img.w / 2, img.h / 2);
     if cw < 21 || ch < 21 {
         return Vec::new();
@@ -103,8 +157,13 @@ fn centre(img: &Gray) -> Vec<String> {
     prepared
         .detect_grids()
         .into_iter()
-        .filter_map(|g| g.decode().ok().map(|(_, text)| text))
-        .filter(|t| !t.is_empty())
+        .filter_map(|g| {
+            let corners = g.bounds.map(|p| (p.x + x0 as i32, p.y + y0 as i32));
+            g.decode()
+                .ok()
+                .map(|(_, text)| (text, Region::around(corners, img.w, img.h)))
+        })
+        .filter(|(t, _)| !t.is_empty())
         .collect()
 }
 
@@ -163,7 +222,26 @@ mod tests {
     fn rqrr_reads_the_centre() {
         let text = "UR:BYTES/HDCXDWINVEZM";
         let img = picture(text, 3, 400, 400, (140, 140));
-        assert_eq!(centre(&img), vec![text.to_string()]);
+        let read = centre(&img);
+        assert_eq!(read.len(), 1);
+        assert_eq!(read[0].0, text);
+        // Where it is, in the whole picture's pixels: the code starts at (140, 140).
+        let r = read[0].1.expect("a region");
+        assert!(
+            r.x0.abs_diff(140) <= 15 && r.y0.abs_diff(140) <= 15,
+            "{r:?}"
+        );
+    }
+
+    #[test]
+    fn zxing_says_where_the_code_is() {
+        let img = picture("UR:BYTES/HDCXDWINVEZM", 4, 640, 480, (300, 200));
+        let found = Decoder::new().decode(&img);
+        let r = found.region.expect("a region");
+        assert!(
+            r.x0.abs_diff(300) <= 20 && r.y0.abs_diff(200) <= 20,
+            "{r:?}"
+        );
     }
 
     #[test]

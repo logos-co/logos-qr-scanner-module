@@ -14,6 +14,9 @@ use crate::render;
 pub const IDLE: Duration = Duration::from_secs(30);
 /// A terminal presenter that hasn't rendered for this long is gone.
 pub const PRESENTER_FRESH: Duration = Duration::from_secs(10);
+/// The densest code a terminal shows, whatever its size: a Keycard Shell read version 4 from a
+/// terminal well and version 6 with trouble, and a large text console allows far denser ones.
+pub const PRESENTER_MAX_VERSION: u8 = 5;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -525,7 +528,7 @@ impl Scanner {
             .presenter
             .as_ref()
             .filter(|p| p.seen.elapsed() < PRESENTER_FRESH)?;
-        (1..=frames::MAX_VERSION)
+        (1..=PRESENTER_MAX_VERSION)
             .rev()
             .find(|v| render::fits(frames::size_of(*v) + 4, p.cols, p.rows))
     }
@@ -806,8 +809,13 @@ mod tests {
         assert!(sc.presenter_render("prs_0.nope", 100, 50).is_err());
         let p = sc.poll(&id, &token).unwrap();
         assert!(p.presenter);
-        // Two columns and one row a module: 100 by 50 holds 48 modules, a version 6 code and its margin.
-        assert_eq!(p.presenter_max_version, Some(6));
+        // Two columns and one row a module: 100 by 50 would hold a version 6 code and its margin,
+        // but a terminal shows no denser than version 5.
+        assert_eq!(p.presenter_max_version, Some(5));
+        // A small terminal still limits it: 70 by 35 holds 33 modules (version 3 and its margin) and
+        // the status lines.
+        sc.presenter_render(&h, 70, 35).unwrap();
+        assert_eq!(sc.poll(&id, &token).unwrap().presenter_max_version, Some(3));
         sc.presenter_detach(&h).unwrap();
         assert!(sc.presenter_render(&h, 100, 50).is_err());
     }
