@@ -383,11 +383,11 @@
         "rust-overlay": "rust-overlay"
       },
       "locked": {
-        "lastModified": 1792018569,
-        "narHash": "sha256-D2RjKRXlWG6NLId81KWVhnu9NDFypj0drMLDQn7X7VU=",
+        "lastModified": 1792175050,
+        "narHash": "sha256-lc7YecyaGnZgbgfE1LOR0yFpiORYAanZMIsbvKzLPac=",
         "owner": "logos-co",
         "repo": "logos-module-builder",
-        "rev": "ac4ff31674bef3860ef10c2883e719452e573418",
+        "rev": "a0de2d347c8b7c3a1e6ff12f6861edf0f3f716d0",
         "type": "github"
       },
       "original": {
