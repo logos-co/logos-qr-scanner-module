@@ -1,0 +1,132 @@
+name: qr-scanner-module Unit Tests
+
+# The module's core (sessions, frames, the terminal presenter) and the helper (protocol, decoders, and
+# fake mode end to end, with a TCP peer for the camera). No camera is needed.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: unit-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  module:
+    name: module (cargo test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # rust-lib's rust-version, the builder's rustc: a pass here can't fail the real build on MSRV.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.89"
+          components: clippy, rustfmt
+      - name: Provide the SDK manifest cargo resolves
+        uses: actions/checkout@v4
+        with:
+          repository: logos-co/logos-rust-sdk
+          path: logos-rust-sdk-src
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust-lib
+      - name: cargo test
+        # Zero tests also reports success, so the count must be above zero.
+        run: |
+          set -o pipefail
+          cd rust-lib
+          cargo test --locked --no-default-features 2>&1 | tee /tmp/unit.log
+          ran=$(grep -oE '^test result: ok\. [0-9]+ passed' /tmp/unit.log | awk '{s+=$4} END {print s+0}')
+          echo "tests run: $ran"
+          [ "$ran" -gt 0 ]
+      - name: clippy and rustfmt
+        run: |
+          cd rust-lib
+          cargo clippy --locked --no-default-features --all-targets -- -D warnings
+          cargo fmt --check
+      - name: Every contract method must be documented
+        run: |
+          methods=$(grep -E '^    fn [a-z_]+\(.*;$' rust-lib/src/glue.rs | grep -oE 'fn [a-z_]+' | awk '{print $2}' | sort -u)
+          missing=0
+          for m in $methods; do
+            grep -q "\`$m\`" docs/specs.md || { echo "UNDOCUMENTED: $m"; missing=1; }
+          done
+          echo "checked $(echo "$methods" | wc -w) contract methods"
+          exit $missing
+
+  helper:
+    name: helper (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.89"
+          components: clippy, rustfmt, llvm-tools
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: helper
+      # SDL builds its X11 and Wayland backends from these headers; it loads the libraries at run time.
+      - name: SDL's build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake pkg-config libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev \
+            libxtst-dev libxfixes-dev libxss-dev libwayland-dev wayland-protocols libxkbcommon-dev libdecor-0-dev \
+            libpipewire-0.3-dev libgl1-mesa-dev
+      - name: cargo test (fake mode included)
+        run: |
+          set -o pipefail
+          cd helper
+          # zxing-cpp's debug build wants MSVC's debug C runtime, which Rust never links.
+          profile=
+          [ "$RUNNER_OS" = Windows ] && profile=--release
+          cargo test --locked $profile --features fake-device 2>&1 | tee /tmp/unit.log
+          ran=$(grep -oE '^test result: ok\. [0-9]+ passed' /tmp/unit.log | awk '{s+=$4} END {print s+0}')
+          echo "tests run: $ran"
+          [ "$ran" -gt 0 ]
+      - name: clippy and rustfmt
+        run: |
+          cd helper
+          cargo clippy --locked --features fake-device --all-targets -- -D warnings
+          cargo fmt --check
+      # Built as the release builds it. The .exe ships alone, so it may import system DLLs only.
+      - name: The static .exe imports system DLLs only
+        if: runner.os == 'Windows'
+        env:
+          RUSTFLAGS: "-C target-feature=+crt-static"
+        run: |
+          cd helper
+          export CMAKE_TOOLCHAIN_FILE_x86_64_pc_windows_msvc="$(cygpath -m "$PWD/static-crt.cmake")"
+          cargo build --locked --release --target x86_64-pc-windows-msvc
+          objdump="$(rustc --print sysroot)/lib/rustlib/x86_64-pc-windows-msvc/bin/llvm-objdump.exe"
+          dlls=$("$objdump" -p target/x86_64-pc-windows-msvc/release/logos-qr-helper.exe \
+            | sed -n 's/^ *DLL Name: //p' | tr 'A-Z' 'a-z' | sort -u)
+          echo "$dlls"
+          bad=0
+          for d in $dlls; do
+            case "$d" in
+              api-ms-win-*|advapi32.dll|bcrypt.dll|bcryptprimitives.dll|cfgmgr32.dll|combase.dll|dwmapi.dll|gdi32.dll|hid.dll|imm32.dll|\
+              kernel32.dll|ntdll.dll|ole32.dll|oleaut32.dll|setupapi.dll|shell32.dll|shlwapi.dll|user32.dll|\
+              userenv.dll|uxtheme.dll|version.dll|winmm.dll|ws2_32.dll|mfplat.dll|mf.dll|mfreadwrite.dll) ;;
+              *) echo "::error::logos-qr-helper.exe imports $d, which Windows doesn't ship"; bad=1 ;;
+            esac
+          done
+          exit $bad
+      # Unsigned and unreleased: for trying a branch on a Windows machine by hand.
+      - name: Keep the .exe for hand checks
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: logos-qr-helper-windows-x86_64
+          path: helper/target/x86_64-pc-windows-msvc/release/logos-qr-helper.exe
+          retention-days: 14

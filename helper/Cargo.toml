@@ -1,0 +1,68 @@
+[package]
+name = "logos-qr-helper"
+version = "0.1.0"
+edition = "2021"
+description = "The Logos QR helper: shows QR frames, reads QR codes through the camera, and hands back only their text."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/logos-co/logos-qr-scanner-module"
+rust-version = "1.89"
+
+[workspace]
+resolver = "3"
+
+[[bin]]
+name = "logos-qr-helper"
+path = "src/main.rs"
+
+# The other end of fake mode, for doctests; never released.
+[[bin]]
+name = "qr-fake-device"
+path = "src/bin/fake_device.rs"
+required-features = ["fake-device"]
+
+[features]
+fake-device = ["dep:qrcodegen"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# SDL built from its own source, statically, with only what the helper uses: no joysticks, so no dinput8.
+sdl3-sys = { version = "0.7.2", default-features = false, features = [
+    "build-from-source-static",
+    "no-default-subsystems",
+    "sdl-camera",
+    "sdl-video",
+    "sdl-render",
+] }
+zxing-cpp = { version = "0.5.3", features = ["bundled"] }
+rqrr = { version = "0.11", default-features = false }
+qrcodegen = { version = "1.8", optional = true }
+# MJPEG frames, which SDL can't convert and webcams often keep their HD modes for.
+zune-jpeg = "0.4"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# A webcam's exposure, set through DirectShow while SDL streams it through Media Foundation.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Media_DirectShow",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Ole",
+    "Win32_System_Variant",
+] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-av-foundation = { version = "0.3", default-features = false, features = ["std", "AVCaptureDevice", "AVMediaFormat", "block2"] }
+block2 = "0.6"
+
+[dev-dependencies]
+jpeg-encoder = "0.7.1"
+qrcodegen = "1.8"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

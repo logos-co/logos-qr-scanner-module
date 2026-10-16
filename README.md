@@ -13,6 +13,10 @@ logoscore call qr_scanner_module stop <session> <token>
 From a terminal with no window, `tools/qr-present` (or `tools\qr-present.ps1`) draws the codes through plain
 `logosctl call`, while the helper reads the camera without a window.
 
+A request and its answer are two steps: the request's codes are shown with the camera off, and the camera
+comes on only when the person says the wallet shows its answer, with **Scan the answer** in the window or
+Enter in the terminal.
+
 ## Layout
 
 | Path | What |

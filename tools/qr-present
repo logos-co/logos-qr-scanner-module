@@ -1,0 +1,54 @@
+#!/bin/sh
+# Show qr_scanner_module's codes in this terminal: it draws them, this only prints them, through plain
+# logosctl. While this runs, the module's helper reads the camera without a window. A request is shown
+# with the camera off: press Enter once the wallet shows its answer, and again to see the request
+# again. Ctrl-C to stop.
+#   tools/qr-present [logosctl]
+ctl=${1:-logosctl}
+
+# "rows cols". stty asks the terminal itself: tput inside $(...) can't see it, and says 80x24.
+# QR_PRESENT_SIZE="rows cols" draws within at most that, for a terminal so big that its codes are
+# too dense for the wallet's camera; the codes then shrink to fit.
+size() {
+    s=$(stty size </dev/tty 2>/dev/null)
+    case "$s" in
+        "" | "0 "* | *" 0") s="${LINES:-24} ${COLUMNS:-80}" ;;
+    esac
+    if [ -n "${QR_PRESENT_SIZE:-}" ]; then
+        set -- $s $QR_PRESENT_SIZE
+        s="$(( $1 < $3 ? $1 : $3 )) $(( $2 < $4 ? $2 : $4 ))"
+    fi
+    echo "$s"
+}
+
+# Keys arrive one at a time, unechoed, and a read gives up after QR_PRESENT_HOLD tenths of a second
+# (2 by default): how long each code stays drawn. The module picks the code due by then, and the
+# codes are fountain-coded, so a slower terminal only skips some.
+hold=${QR_PRESENT_HOLD:-2}
+saved=$(stty -g </dev/tty 2>/dev/null)
+if [ -n "$saved" ] && stty -icanon -echo min 0 time "$hold" </dev/tty 2>/dev/null; then
+    keys=yes
+else
+    keys=
+fi
+
+h=$("$ctl" --human call qr_scanner_module presenter_attach) || exit 1
+restore() {
+    # In the background: with the daemon gone, the call would hold the terminal until it times out.
+    "$ctl" call qr_scanner_module presenter_detach "str:$h" >/dev/null 2>&1 &
+    [ -n "$keys" ] && stty "$saved" </dev/tty 2>/dev/null
+    printf '\033[0m\033[?25h\n'
+}
+trap 'restore; exit 0' INT TERM HUP
+printf '\033[2J\033[?25l'
+while set -- $(size) && out=$("$ctl" --human call qr_scanner_module presenter_render "str:$h" "$2" "$1"); do
+    printf '\033[H%s\033[J' "$out"
+    if [ -n "$keys" ]; then
+        if [ "$(dd bs=1 count=1 </dev/tty 2>/dev/null | wc -c | tr -d ' ')" != 0 ]; then
+            "$ctl" call qr_scanner_module presenter_press "str:$h" >/dev/null 2>&1
+        fi
+    else
+        sleep "$(printf "%d.%d" $((hold / 10)) $((hold % 10)))"
+    fi
+done
+restore

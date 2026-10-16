@@ -1,0 +1,339 @@
+//! The helper's window, drawn with SDL3's renderer and its built-in 8x8 font: the frames to show,
+//! the camera's picture for aiming, what has been read so far, the button the module asks for, and
+//! Cancel. No Qt.
+
+use std::ffi::CString;
+use std::ptr::{null, null_mut};
+
+use sdl3_sys::everything::*;
+
+use crate::decode::Gray;
+use crate::protocol::Frame;
+
+pub struct View<'a> {
+    pub frame: Option<&'a Frame>,
+    pub preview: Option<&'a Gray>,
+    pub scanning: bool,
+    /// A code was in the camera's view a moment ago.
+    pub seeing: bool,
+    pub lines: &'a [String],
+    /// The label of a button the module asked for.
+    pub ask: Option<&'a str>,
+}
+
+pub struct Window {
+    win: *mut SDL_Window,
+    ren: *mut SDL_Renderer,
+    tex: *mut SDL_Texture,
+    tex_size: (i32, i32),
+    cancel: SDL_FRect,
+    ask: SDL_FRect,
+}
+
+const BAR: f32 = 112.0;
+const NONE: SDL_FRect = SDL_FRect {
+    x: 0.0,
+    y: 0.0,
+    w: 0.0,
+    h: 0.0,
+};
+
+fn cstr(s: &str) -> CString {
+    CString::new(s.replace('\0', " ")).unwrap_or_default()
+}
+
+impl Window {
+    /// SDL's video must be initialised.
+    pub fn open(title: &str) -> Result<Window, String> {
+        let mut win = null_mut();
+        let mut ren = null_mut();
+        let t = cstr(title);
+        // SAFETY: both out-pointers are valid; SDL fills them on success.
+        let ok = unsafe {
+            SDL_CreateWindowAndRenderer(
+                t.as_ptr(),
+                900,
+                560,
+                SDL_WINDOW_RESIZABLE,
+                &mut win,
+                &mut ren,
+            )
+        };
+        if !ok {
+            return Err(crate::camera::sdl_error());
+        }
+        // SAFETY: the window was just created.
+        unsafe {
+            SDL_SetWindowMinimumSize(win, 480, 360);
+            SDL_RaiseWindow(win);
+        }
+        Ok(Window {
+            win,
+            ren,
+            tex: null_mut(),
+            tex_size: (0, 0),
+            cancel: NONE,
+            ask: NONE,
+        })
+    }
+
+    pub fn set_title(&self, title: &str) {
+        let t = cstr(title);
+        // SAFETY: the window is alive for as long as `self`.
+        unsafe { SDL_SetWindowTitle(self.win, t.as_ptr()) };
+    }
+
+    pub fn hits_cancel(&self, x: f32, y: f32) -> bool {
+        hits(&self.cancel, x, y)
+    }
+
+    pub fn hits_ask(&self, x: f32, y: f32) -> bool {
+        hits(&self.ask, x, y)
+    }
+
+    pub fn draw(&mut self, v: &View) {
+        // SAFETY: every call below takes the renderer this value owns.
+        unsafe {
+            let (mut w, mut h) = (0, 0);
+            SDL_GetCurrentRenderOutputSize(self.ren, &mut w, &mut h);
+            let (w, h) = (w as f32, h as f32);
+            SDL_SetRenderDrawColor(self.ren, 32, 36, 40, 255);
+            SDL_RenderClear(self.ren);
+
+            let body = SDL_FRect {
+                x: 16.0,
+                y: 16.0,
+                w: w - 32.0,
+                h: h - BAR - 32.0,
+            };
+            match (v.frame, v.scanning) {
+                (Some(f), true) => {
+                    let half = (body.w - 16.0) / 2.0;
+                    self.qr(f, SDL_FRect { w: half, ..body });
+                    self.camera(
+                        v,
+                        SDL_FRect {
+                            x: body.x + half + 16.0,
+                            w: half,
+                            ..body
+                        },
+                    );
+                }
+                (Some(f), false) => self.qr(f, body),
+                (None, true) => self.camera(v, body),
+                (None, false) => {}
+            }
+
+            // Two lines across the window, then the buttons on a row of their own, right-aligned.
+            self.cancel = SDL_FRect {
+                x: w - 136.0,
+                y: h - 56.0,
+                w: 120.0,
+                h: 40.0,
+            };
+            // The font is 16 pixels a character at this scale.
+            self.ask = match v.ask {
+                Some(label) => {
+                    let bw = 16.0 * label.chars().count() as f32 + 24.0;
+                    SDL_FRect {
+                        x: self.cancel.x - bw - 12.0,
+                        w: bw,
+                        ..self.cancel
+                    }
+                }
+                None => NONE,
+            };
+            let fit = ((w - 32.0) / 16.0).max(0.0) as usize;
+            let first = v.lines.first().map_or("", String::as_str);
+            let second = v.lines.get(1).map_or("", String::as_str);
+            for (i, line) in bar_lines(first, second, fit).iter().enumerate() {
+                self.text(16.0, h - BAR + 8.0 + i as f32 * 24.0, line, (230, 232, 235));
+            }
+            if let Some(label) = v.ask {
+                SDL_SetRenderDrawColor(self.ren, 46, 120, 220, 255);
+                SDL_RenderFillRect(self.ren, &self.ask);
+                self.text(self.ask.x + 12.0, self.ask.y + 12.0, label, (255, 255, 255));
+            }
+            SDL_SetRenderDrawColor(self.ren, 90, 96, 104, 255);
+            SDL_RenderFillRect(self.ren, &self.cancel);
+            self.text(
+                self.cancel.x + 12.0,
+                self.cancel.y + 12.0,
+                "Cancel",
+                (255, 255, 255),
+            );
+            SDL_RenderPresent(self.ren);
+        }
+    }
+
+    /// A frame on white, with its quiet zone, in whole pixels a module so it stays sharp.
+    unsafe fn qr(&self, f: &Frame, area: SDL_FRect) {
+        let n = f.size as f32 + 8.0;
+        let m = (area.w.min(area.h) / n).floor().max(1.0);
+        let side = m * n;
+        let x0 = area.x + ((area.w - side) / 2.0).floor();
+        let y0 = area.y + ((area.h - side) / 2.0).floor();
+        SDL_SetRenderDrawColor(self.ren, 255, 255, 255, 255);
+        SDL_RenderFillRect(
+            self.ren,
+            &SDL_FRect {
+                x: x0,
+                y: y0,
+                w: side,
+                h: side,
+            },
+        );
+        let mut dark = Vec::with_capacity(f.size * f.size / 2);
+        for y in 0..f.size {
+            for x in 0..f.size {
+                if f.dark(x, y) {
+                    dark.push(SDL_FRect {
+                        x: x0 + (x as f32 + 4.0) * m,
+                        y: y0 + (y as f32 + 4.0) * m,
+                        w: m,
+                        h: m,
+                    });
+                }
+            }
+        }
+        SDL_SetRenderDrawColor(self.ren, 0, 0, 0, 255);
+        SDL_RenderFillRects(self.ren, dark.as_ptr(), dark.len() as i32);
+    }
+
+    /// The camera's picture, fitted to the area, framed green while a code is in view.
+    unsafe fn camera(&mut self, v: &View, area: SDL_FRect) {
+        let Some(p) = v.preview else {
+            self.text(
+                area.x + 8.0,
+                area.y + area.h / 2.0,
+                "Waiting for the camera...",
+                (200, 204, 210),
+            );
+            return;
+        };
+        let (pw, ph) = (p.w as i32, p.h as i32);
+        if self.tex.is_null() || self.tex_size != (pw, ph) {
+            if !self.tex.is_null() {
+                SDL_DestroyTexture(self.tex);
+            }
+            self.tex = SDL_CreateTexture(
+                self.ren,
+                SDL_PIXELFORMAT_RGBA32,
+                SDL_TEXTUREACCESS_STREAMING,
+                pw,
+                ph,
+            );
+            self.tex_size = (pw, ph);
+        }
+        if self.tex.is_null() {
+            return;
+        }
+        let rgba: Vec<u8> = p.px.iter().flat_map(|&g| [g, g, g, 255]).collect();
+        SDL_UpdateTexture(self.tex, null(), rgba.as_ptr().cast(), pw * 4);
+        let scale = (area.w / p.w as f32).min(area.h / p.h as f32);
+        let (dw, dh) = (p.w as f32 * scale, p.h as f32 * scale);
+        let dst = SDL_FRect {
+            x: area.x + (area.w - dw) / 2.0,
+            y: area.y + (area.h - dh) / 2.0,
+            w: dw,
+            h: dh,
+        };
+        SDL_RenderTexture(self.ren, self.tex, null(), &dst);
+        let (r, g, b) = if v.seeing {
+            (60, 200, 110)
+        } else {
+            (120, 126, 134)
+        };
+        SDL_SetRenderDrawColor(self.ren, r, g, b, 255);
+        for i in 0..3 {
+            let k = i as f32;
+            SDL_RenderRect(
+                self.ren,
+                &SDL_FRect {
+                    x: dst.x - k,
+                    y: dst.y - k,
+                    w: dst.w + 2.0 * k,
+                    h: dst.h + 2.0 * k,
+                },
+            );
+        }
+    }
+
+    /// Text at twice the font's size.
+    unsafe fn text(&self, x: f32, y: f32, s: &str, (r, g, b): (u8, u8, u8)) {
+        let t = cstr(s);
+        SDL_SetRenderDrawColor(self.ren, r, g, b, 255);
+        SDL_SetRenderScale(self.ren, 2.0, 2.0);
+        SDL_RenderDebugText(self.ren, x / 2.0, y / 2.0, t.as_ptr());
+        SDL_SetRenderScale(self.ren, 1.0, 1.0);
+    }
+}
+
+/// The bar's two lines, `fit` characters each: a long first line wraps at a space onto an empty
+/// second, and what still doesn't fit ends in "...".
+fn bar_lines(first: &str, second: &str, fit: usize) -> [String; 2] {
+    let cut = |s: &str| {
+        if s.chars().count() <= fit {
+            s.to_string()
+        } else {
+            s.chars().take(fit.saturating_sub(3)).collect::<String>() + "..."
+        }
+    };
+    if !second.is_empty() || first.chars().count() <= fit {
+        return [cut(first), cut(second)];
+    }
+    let mut head = String::new();
+    let mut words = first.split(' ').peekable();
+    while let Some(word) = words.peek() {
+        let wide = head.chars().count() + usize::from(!head.is_empty()) + word.chars().count();
+        if wide > fit && !head.is_empty() {
+            break;
+        }
+        if !head.is_empty() {
+            head.push(' ');
+        }
+        head.push_str(word);
+        words.next();
+    }
+    [cut(&head), cut(&words.collect::<Vec<_>>().join(" "))]
+}
+
+fn hits(r: &SDL_FRect, x: f32, y: f32) -> bool {
+    r.w > 0.0 && x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h
+}
+
+impl Drop for Window {
+    fn drop(&mut self) {
+        // SAFETY: each object was created by this value and is destroyed once, texture first.
+        unsafe {
+            if !self.tex.is_null() {
+                SDL_DestroyTexture(self.tex);
+            }
+            SDL_DestroyRenderer(self.ren);
+            SDL_DestroyWindow(self.win);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bar_lines;
+
+    #[test]
+    fn a_long_hint_wraps_onto_the_empty_second_line() {
+        let [a, b] = bar_lines(
+            "Scan these codes with your wallet and confirm on it",
+            "",
+            24,
+        );
+        assert_eq!(a, "Scan these codes with");
+        assert_eq!(b, "your wallet and confi...");
+    }
+
+    #[test]
+    fn a_second_line_keeps_its_place() {
+        let [a, b] = bar_lines("Hold your wallet's answer up", "Camera: FaceTime", 20);
+        assert_eq!(a, "Hold your wallet'...");
+        assert_eq!(b, "Camera: FaceTime");
+    }
+}
