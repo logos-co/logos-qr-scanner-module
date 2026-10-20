@@ -45,6 +45,13 @@ Errors are `{ ok: false, code, error }`, with `code` one of `busy`, `invalid`, `
 session's own `error.code` comes from the helper: `camera_denied`, `no_camera`, `camera_failed`,
 `no_window`, `helper`.
 
+**Unlock-key requests.** A seed's unlock key is the public key at `m/1280263247'/n'`, under a reserved
+purpose (the signer interface's `unlock`), and whoever reads a wallet's signature there can recover it.
+So `start` refuses (`not_authorized`) to show an `ur:eth-sign-request` whose path starts at that purpose,
+hardened or not, unless `qr_signer_module` asks. It reads every such request among the parts, whole or
+from its fountain parts; one it can't read, or whose parts aren't all there, is refused the same way.
+Other codes are shown as they are.
+
 ### Events
 
 | Event | Arguments |

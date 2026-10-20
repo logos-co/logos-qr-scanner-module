@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use crate::frames::{self, Frame};
+use crate::guard;
 use crate::helper::{Helper, HelperEvent, Launcher};
 use crate::render;
 
@@ -319,7 +320,9 @@ impl Scanner {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// `caller` is the asking module's name, for the window's title, when the core names it.
+    /// `caller` is the asking module's name, for the window's title, when the core names it. Only
+    /// the QR signer module may show a request under the unlock keys' purpose: whoever reads the
+    /// wallet's answer has that seed's unlock key.
     pub fn start(
         &self,
         p: StartParams,
@@ -334,6 +337,9 @@ impl Scanner {
             return Err(ScanError::Invalid(
                 "nothing to do: give parts to show, scan, or both".into(),
             ));
+        }
+        if caller != Some(guard::OPENER) && guard::asks_unlock_key(&show.parts) {
+            return Err(ScanError::NotAuthorized);
         }
         let max = show.max_version.unwrap_or(frames::MAX_VERSION);
         let frames = frames::encode(&show.parts, max).map_err(ScanError::Invalid)?;
@@ -1118,6 +1124,32 @@ mod tests {
         sc.start(params(r#"{"scan":true}"#), Some("some_wallet"))
             .unwrap();
         assert!(!fake.sinks.lock().unwrap()[0].0, "in the window");
+    }
+
+    #[test]
+    fn only_the_qr_signer_shows_a_request_for_an_unlock_key() {
+        use crate::guard::tests::{fountain, request, single};
+        let unlock = request(&[0x8000_0000 | guard::PURPOSE, 0x8000_0000]);
+        let evm = request(&[0x8000_002c, 0x8000_003c, 0x8000_0000, 0, 0]);
+        let (sc, fake, _) = scanner();
+        for parts in [single(&unlock), fountain(&unlock)] {
+            let p = serde_json::json!({ "show": { "parts": parts }, "scan": true }).to_string();
+            for caller in [Some("some_wallet"), Some("evm_signer_ui"), None] {
+                assert_eq!(
+                    sc.start(params(&p), caller).unwrap_err(),
+                    ScanError::NotAuthorized,
+                    "{caller:?}"
+                );
+            }
+            assert!(fake.sinks.lock().unwrap().is_empty(), "nothing shown");
+        }
+        // Another module's ordinary request is shown, and the QR signer's unlock-key request too.
+        let p = serde_json::json!({ "show": { "parts": single(&evm) }, "scan": true }).to_string();
+        let (id, token) = sc.start(params(&p), Some("some_wallet")).unwrap();
+        sc.stop(&id, &token).unwrap();
+        let p =
+            serde_json::json!({ "show": { "parts": fountain(&unlock) }, "scan": true }).to_string();
+        assert!(sc.start(params(&p), Some(guard::OPENER)).is_ok());
     }
 
     #[test]
