@@ -1,7 +1,7 @@
 //! What each system needs before the camera opens.
 //!
 //! macOS charges a process's camera to the app responsible for it: Basecamp for a module there, the
-//! terminal for one under logoscore. So the helper first re-executes itself with that link
+//! terminal for one under logosctl. So the helper first re-executes itself with that link
 //! disclaimed, as Qt Creator's `disclaim` and Chromium do, and macOS then asks in the helper's own
 //! name. It keeps its process id and its pipes. Then it asks for the camera itself, since SDL relies
 //! on an implicit prompt and reports a refusal only as a failure to open.

@@ -5,9 +5,9 @@ needs it: a QR wallet's signer, a wallet scanning an address. It bundles the **L
 alone opens the camera and hands back only the text of each code. See [docs/specs.md](docs/specs.md).
 
 ```sh
-logoscore call qr_scanner_module start '{"title":"Sign","show":{"parts":["UR:BYTES/..."]},"scan":true}'
-logoscore call qr_scanner_module poll <session> <token>     # { state, texts: [...] }
-logoscore call qr_scanner_module stop <session> <token>
+logosctl call qr_scanner_module start '{"title":"Sign","show":{"parts":["UR:BYTES/..."]},"scan":true}'
+logosctl call qr_scanner_module poll <session> <token>     # { state, texts: [...] }
+logosctl call qr_scanner_module stop <session> <token>
 ```
 
 From a terminal with no window, `tools/qr-present` (or `tools\qr-present.ps1`) draws the codes through plain

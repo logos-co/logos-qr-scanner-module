@@ -6,7 +6,7 @@ hands back only the text of each code it reads: the camera's pictures never leav
 
 ## Why a helper, and why one
 
-- **The camera stays out of host apps.** Basecamp, `logos_host`, `ui-host` and `logoscore` carry no camera
+- **The camera stays out of host apps.** Basecamp, `logos_host`, `ui-host` and `logosctl` carry no camera
   entitlement or usage string, and none is needed.
 - **One identity.** On macOS the helper is an app, `LogosQR.app` (`co.logos.QRHelper`, "Logos QR"). It
   re-executes itself with its responsibility disclaimed (`responsibility_spawnattrs_setdisclaim`, looked up at

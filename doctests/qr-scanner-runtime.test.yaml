@@ -7,11 +7,11 @@ intro: |
   opens the camera itself: the Logos QR helper it bundles does, and hands back only the text of each
   code. One session runs at a time, and what a session read goes only to the holder of its token.
 
-  This doc-test runs headless through `logoscore`. The helper runs in fake mode: instead of a camera and
+  This doc-test runs headless through `logosctl`. The helper runs in fake mode: instead of a camera and
   a window, it talks to `qr-fake-device`, which logs what the window would show and holds up a code for
   the camera.
 
-what_you_build: "The QR scanner module and a fake QR device, driven through a `logoscore` daemon."
+what_you_build: "The QR scanner module and a fake QR device, driven through a `logosctl` daemon."
 
 what_you_learn:
   - How a module shows codes and reads the answer through the scanner
@@ -23,17 +23,14 @@ prerequisites:
   - "**A Linux or macOS machine.** Everything here is offline, and no camera is needed."
 
 sections:
-  - title: "Build logoscore and lgpm"
+  - title: "Build logosctl"
     step: true
     steps:
-      - title: "Build logoscore"
-        run: "nix build 'github:logos-co/logos-logoscore-cli#cli' --out-link ./logos"
-        check_file: "logos/bin/logoscore"
-      - title: "Build lgpm"
-        run: "nix build 'github:logos-co/logos-package-manager#cli' -o lgpm"
-        check_file: "lgpm/bin/lgpm"
+      - title: "Build logosctl"
+        run: "nix build 'github:logos-co/logos-logoscore-cli#ctl' --out-link ./logos"
+        check_file: "logos/bin/logosctl"
 
-  - title: "Build and install the scanner"
+  - title: "Build the scanner"
     step: true
     steps:
       - title: "Build the module, the fake device and the terminal presenter"
@@ -48,16 +45,6 @@ sections:
         expect_contains:
           - "qr-fake-device"
           - "qr-present"
-      - title: "Install it"
-        run: |
-          mkdir -p modules
-          cp -RL ./logos/modules/. ./modules/
-          chmod -R u+w modules
-          ./lgpm/bin/lgpm --modules-dir ./modules --allow-unsigned install --file scanner-lgx/*.lgx
-          ./lgpm/bin/lgpm --modules-dir ./modules list
-        code_block: "lgpm --modules-dir ./modules --allow-unsigned install --file scanner-lgx/*.lgx"
-        expect_contains:
-          - "qr_scanner_module"
 
   - title: "A fake device, and the daemon"
     step: true
@@ -69,12 +56,25 @@ sections:
           - "127.0.0.1:"
       - title: "Start the daemon, its helper pointed at the fake device"
         text: "Without `LOGOS_QR_HELPER_FAKE`, the helper opens the camera and a window."
-        run: "sh -c 'LOGOS_QR_HELPER_FAKE=$(cat device.addr) ./logos/bin/logoscore -D -m ./modules > logs.txt 2>&1 &'"
-        code_block: "LOGOS_QR_HELPER_FAKE=127.0.0.1:<port> logoscore -D -m ./modules > logs.txt &"
-      - run: "sleep 3"
+        # The bundled package downloader starts a storage node in $HOME; keep it out of the real one.
+        run: "mkdir -p home && LOGOS_QR_HELPER_FAKE=$(cat device.addr) HOME=\"$PWD/home\" ./logos/bin/logosctl --config-dir ./session daemon start --detach"
+        code_block: "LOGOS_QR_HELPER_FAKE=127.0.0.1:<port> logosctl daemon start --detach"
+        expect_contains:
+          - "Daemon started"
+      - title: "Install it"
+        text: |
+          Copy the packages into `./packages` and install them all into the daemon's session. They are
+          unsigned local builds, which the default signature policy accepts with a warning.
+        run: |
+          mkdir -p packages && cp -f *-lgx/*.lgx packages/
+          ./logos/bin/logosctl --config-dir ./session install --dir packages -y
+          ./logos/bin/logosctl --config-dir ./session package ls
+        code_block: "logosctl install --dir packages -y"
+        expect_contains:
+          - "qr_scanner_module"
       - title: "Load the scanner"
-        run: "./logos/bin/logoscore load-module qr_scanner_module"
-        code_block: "logoscore load-module qr_scanner_module"
+        run: "./logos/bin/logosctl --config-dir ./session module load qr_scanner_module"
+        code_block: "logosctl module load qr_scanner_module"
         expect_contains:
           - "qr_scanner_module"
 
@@ -86,17 +86,17 @@ sections:
     steps:
       - title: "Start a session"
         run: |
-          ./logos/bin/logoscore call qr_scanner_module start '{"title":"doc-test","show":{"parts":["UR:BYTES/AEADAOLYTOMWGTKP"]},"scan":true,"hint":"show the answer"}' > start.json
-          python3 -c 'import json,sys; r=json.loads(json.load(open(sys.argv[1]))["result"]); print(r["session"]); print(r["token"], file=open("token","w"))' start.json > session
-          cat session
-        code_block: "logoscore call qr_scanner_module start '{\"show\":{\"parts\":[\"UR:BYTES/...\"]},\"scan\":true}'"
+          ./logos/bin/logosctl --config-dir ./session call qr_scanner_module start '{"title":"doc-test","show":{"parts":["UR:BYTES/AEADAOLYTOMWGTKP"]},"scan":true,"hint":"show the answer"}' > start.json
+          python3 -c 'import json,sys; r=json.loads(json.load(open(sys.argv[1]))["result"]); print(r["session"]); print(r["token"], file=open("token","w"))' start.json > session.id
+          cat session.id
+        code_block: "logosctl call qr_scanner_module start '{\"show\":{\"parts\":[\"UR:BYTES/...\"]},\"scan\":true}'"
         expect_contains:
           - "qrs_"
       - title: "Poll it until the code is read"
         run: |
-          for i in $(seq 1 40); do ./logos/bin/logoscore call qr_scanner_module poll "$(cat session)" "$(cat token)" > poll.json; grep -q 'HDCXDWINVEZM' poll.json && break; sleep 0.5; done
+          for i in $(seq 1 40); do ./logos/bin/logosctl --config-dir ./session call qr_scanner_module poll "$(cat session.id)" "$(cat token)" > poll.json; grep -q 'HDCXDWINVEZM' poll.json && break; sleep 0.5; done
           cat poll.json
-        code_block: "logoscore call qr_scanner_module poll <session> <token>"
+        code_block: "logosctl call qr_scanner_module poll <session> <token>"
         expect_contains:
           - '\"state\":\"running\"'
           - "UR:BYTES/HDCXDWINVEZM"
@@ -105,15 +105,15 @@ sections:
         expect_contains:
           - "shown to the device"
       - title: "Someone else's token gets nothing"
-        run: "./logos/bin/logoscore call qr_scanner_module poll \"$(cat session)\" 0123456789abcdef0123456789abcdef"
+        run: "./logos/bin/logosctl --config-dir ./session call qr_scanner_module poll \"$(cat session.id)\" 0123456789abcdef0123456789abcdef"
         expect_contains:
           - "not authorized"
       - title: "A second caller waits its turn"
-        run: "./logos/bin/logoscore call qr_scanner_module start '{\"scan\":true}'"
+        run: "./logos/bin/logosctl --config-dir ./session call qr_scanner_module start '{\"scan\":true}'"
         expect_contains:
           - "busy"
       - title: "Stop it"
-        run: "./logos/bin/logoscore call qr_scanner_module stop \"$(cat session)\" \"$(cat token)\""
+        run: "./logos/bin/logosctl --config-dir ./session call qr_scanner_module stop \"$(cat session.id)\" \"$(cat token)\""
         expect_contains:
           - '\"ok\":true'
 
@@ -121,14 +121,14 @@ sections:
     step: true
     text: |
       With no window, a terminal can show the codes. `qr-present` attaches as the scanner's presenter and
-      prints what the module renders, through plain `logoscore call`; new sessions then read the camera
+      prints what the module renders, through plain `logosctl call`; new sessions then read the camera
       without a window.
     steps:
       - title: "Run the presenter, and start a session that shows a code"
         run: |
-          sh -c 'COLUMNS=100 LINES=50 ./present/bin/qr-present ./logos/bin/logoscore > present.out 2>&1 & echo $! > present.pid'
+          sh -c 'LOGOSCTL_CONFIG_DIR="$PWD/session" COLUMNS=100 LINES=50 ./present/bin/qr-present ./logos/bin/logosctl > present.out 2>&1 & echo $! > present.pid'
           sleep 2
-          ./logos/bin/logoscore call qr_scanner_module start '{"title":"terminal","show":{"parts":["UR:BYTES/AEADAOLYTOMWGTKP"]}}' > start2.json
+          ./logos/bin/logosctl --config-dir ./session call qr_scanner_module start '{"title":"terminal","show":{"parts":["UR:BYTES/AEADAOLYTOMWGTKP"]}}' > start2.json
           sleep 2
           kill "$(cat present.pid)"
           sleep 1
@@ -144,4 +144,4 @@ sections:
   - title: "Stop"
     step: true
     steps:
-      - run: "./logos/bin/logoscore stop || true; kill \"$(cat device.pid)\" || true"
+      - run: "./logos/bin/logosctl --config-dir ./session daemon stop || true; kill \"$(cat device.pid)\" || true"
