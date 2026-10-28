@@ -6,6 +6,7 @@
 //! `logos_module`.
 
 pub mod frames;
+pub mod guard;
 pub mod helper;
 pub mod render;
 pub mod scanner;
