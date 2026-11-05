@@ -1,6 +1,6 @@
 {
   "name": "qr_scanner_module",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "QR scanner: shows QR codes and reads them through the camera for other modules, via the Logos QR helper it bundles. Only decoded text comes back; the camera's pictures never leave the helper.",
   "author": "Logos Core Team",
   "type": "core",
